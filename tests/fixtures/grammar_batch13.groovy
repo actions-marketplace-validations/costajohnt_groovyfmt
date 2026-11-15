@@ -31,4 +31,4 @@ def kind(x, a, b, c, d, e) {
 
 def inc = x -> x + 1
 def lt = (p, q) -> p < q
-[1, 2].each(v -> println v)
+[1, 2].each(v -> println(v))
