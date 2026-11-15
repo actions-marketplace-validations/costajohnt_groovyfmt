@@ -22,7 +22,7 @@ class Batch11 {
      * doc
      */
     @Deprecated
-    private static final Map<String, Integer> counts(int a) throws IOException { [:] }
+    private static final Map<String, Integer> counts(int a) throws Throwable { [:] }
 
     // c
     @Deprecated private boolean flag
