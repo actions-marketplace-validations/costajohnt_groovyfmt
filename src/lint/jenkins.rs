@@ -8,7 +8,8 @@
 //! accepted there but not all listed in the reference.
 //!
 //! Only a declarative pipeline is checked: a top-level `pipeline { }` in a file named
-//! `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` or `*.jenkinsfile`, or in any file whose first statement it is.
+//! `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`,
+//! `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, or in any file whose first statement it is.
 //! Scripted pipelines (`node { }`) are never checked.
 
 use super::{Violation, at, constant_value, has_interpolation};
@@ -1132,6 +1133,8 @@ mod tests {
                 "node {\n stage('x') { sh 'make' }\n}\n".to_string(),
             ),
             ("x.groovy", format!("def x = 1\n{bad}")),
+            // a groovy script is Groovy, not a pipeline by its name
+            ("tool", format!("#!/usr/bin/env groovy\ndef x = 1\n{bad}")),
         ] {
             let v = lint_file(Path::new(name), &src).unwrap();
             assert!(v.iter().all(|v| !v.rule.starts_with("Jenkins")), "{name}");
@@ -1141,7 +1144,10 @@ mod tests {
             "Jenkinsfile.release",
             "Jenkinsfile_k8s",
             "Jenkinsfile-release",
+            "rstan-Jenkinsfile",
+            "ci_Jenkinsfile",
             "deploy.jenkinsfile",
+            "test.jenkins",
         ] {
             let src = format!("def x = 1\n{bad}");
             let v = lint_file(Path::new(name), &src).unwrap();

@@ -351,7 +351,7 @@ class IntegrationTest : UsefulTestCase() {
             "groovyfmt-user-defined", null, "groovyfmt", null, null, "${bin()} --lsp", null, emptyMap(), true,
             null, false, null, null, null, """{"format": {"existingFormatterOverrideable": true}}""", null, null,
         )
-        val patterns = listOf("*.groovy", "*.gvy", "*.gy", "*.gsh", "*.gradle", "*.jenkinsfile", "Jenkinsfile", "Jenkinsfile.*", "Jenkinsfile_*", "Jenkinsfile-*")
+        val patterns = listOf("*.groovy", "*.gvy", "*.gy", "*.gsh", "*.gradle", "*.jenkinsfile", "*.jenkins", "Jenkinsfile", "Jenkinsfile.*", "Jenkinsfile_*", "Jenkinsfile-*", "*-Jenkinsfile", "*_Jenkinsfile")
         LanguageServersRegistry.getInstance().addServerDefinition(
             fixture.project, definition, listOf(ServerMappingSettings.createFileNamePatternsMappingSettings(patterns, "groovy")),
         )
