@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The grammar pin moves to tree-sitter-groovy 0c4a05f. Newly accepted, as Groovy reads them: an `else` after an `if` whose body is a command chain (`if (a) or (b) or (c) {` then `} else {`, `if (a) foo b bar c` then `else {}`, [#109](https://github.com/costajohnt/groovyfmt/issues/109)); an annotation after `def` (`def @Shared String x` in a class, `def @Deprecated x = 1` in a method, [#110](https://github.com/costajohnt/groovyfmt/issues/110)); a classic `for` declaration without a value (`for (int i; i < 3; i++)`, [#111](https://github.com/costajohnt/groovyfmt/issues/111)); `default` and `case` as named-argument keys after another argument of a call without parentheses (`input name: "x", default: false`, [#112](https://github.com/costajohnt/groovyfmt/issues/112)); and Groovy 4 switch arrow cases with a name, type or several labels (`case FOO -> 1`, `case String -> {}`, `case APRIL, MAY -> ...`, `default -> 2`, [#113](https://github.com/costajohnt/groovyfmt/issues/113)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): a Groovy 4 colon case with several labels (`case 6, 9: yield "a"`), a `for` with an empty `;` body, an annotated for-in variable (`for (@Deprecated String s in l)`) and an annotated `def (a, b) = ...`. The one-line `case 1: foo default: bar`, which Groovy reads as `foo(default: bar)`, now parses that way too. On the 23,794-file corpus nothing changes (85 skipped, same output).
+
 ## 0.16.0 (2026-11-15)
 
 ### Fixed
