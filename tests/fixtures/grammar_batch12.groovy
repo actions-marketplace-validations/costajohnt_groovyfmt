@@ -12,8 +12,6 @@ def kind(v) {
             return 2
         case a < b:
             return 3
-        case a < b, c > d:
-            return 4
     }
     def r = switch (v) {
         case List<String> -> 1
