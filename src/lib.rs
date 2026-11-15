@@ -364,7 +364,7 @@ pub(crate) mod scaling {
     pub fn assert_scales_up_to(
         what: &str,
         f: impl Fn(usize),
-        mut n: usize,
+        n: usize,
         max: usize,
         k: usize,
         bound: u32,
