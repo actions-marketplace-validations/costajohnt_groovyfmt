@@ -8,7 +8,7 @@
 //! accepted there but not all listed in the reference.
 //!
 //! Only a declarative pipeline is checked: a top-level `pipeline { }` in a file named
-//! `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile`, or in any file whose first statement it is.
+//! `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` or `*.jenkinsfile`, or in any file whose first statement it is.
 //! Scripted pipelines (`node { }`) are never checked.
 
 use super::{Violation, at, constant_value, has_interpolation};
@@ -1136,7 +1136,13 @@ mod tests {
             let v = lint_file(Path::new(name), &src).unwrap();
             assert!(v.iter().all(|v| !v.rule.starts_with("Jenkins")), "{name}");
         }
-        for name in ["Jenkinsfile", "Jenkinsfile.release", "deploy.jenkinsfile"] {
+        for name in [
+            "Jenkinsfile",
+            "Jenkinsfile.release",
+            "Jenkinsfile_k8s",
+            "Jenkinsfile-release",
+            "deploy.jenkinsfile",
+        ] {
             let src = format!("def x = 1\n{bad}");
             let v = lint_file(Path::new(name), &src).unwrap();
             assert!(

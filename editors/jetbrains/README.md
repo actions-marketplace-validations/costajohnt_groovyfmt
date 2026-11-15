@@ -6,7 +6,7 @@ Formats and lints Groovy, Gradle build scripts and Jenkinsfiles with [groovyfmt]
 - **Code | Reformat with groovyfmt** formats the file with groovyfmt
 - optionally, **Reformat Code** uses groovyfmt, and with it the IDE's **Reformat code** action on save
 
-It covers `*.groovy`, `*.gvy`, `*.gy`, `*.gsh`, `*.gradle`, `*.jenkinsfile`, `Jenkinsfile` and `Jenkinsfile.*`, by file name, whatever file type another plugin gives them. It has no highlighting, completion or navigation of its own: the bundled Groovy and Gradle support and any Jenkins plugin keep providing those, and the plugin works alongside them.
+It covers `*.groovy`, `*.gvy`, `*.gy`, `*.gsh`, `*.gradle`, `*.jenkinsfile`, `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*` and `Jenkinsfile-*`, by file name, whatever file type another plugin gives them. It has no highlighting, completion or navigation of its own: the bundled Groovy and Gradle support and any Jenkins plugin keep providing those, and the plugin works alongside them.
 
 It needs an IDE based on IntelliJ Platform 2024.2 or later (LSP4IJ's minimum), including IntelliJ IDEA Community Edition and Android Studio.
 
