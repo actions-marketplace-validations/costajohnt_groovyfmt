@@ -20,10 +20,10 @@ groovyfmt: formatter and linter for Groovy, Gradle build scripts, and Jenkinsfil
 Usage: groovyfmt [OPTIONS] [PATH]...
 
 PATHs are files or directories (default: the current directory). Directories are
-searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, Jenkinsfile.*
-(if it parses) and *.jenkinsfile, skipping hidden directories, out, target,
-node_modules, build (except a package named build under a src directory within
-its project), and anything matching the config file's `exclude` patterns (which
+searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, Jenkinsfile.*,
+Jenkinsfile_* and Jenkinsfile-* (if it parses) and *.jenkinsfile, skipping
+hidden directories, out, target, node_modules, build (except a package named
+build under a src directory within its project), and anything matching the config file's `exclude` patterns (which
 also apply to files named here).
 Each file uses the nearest .groovyfmt.toml / groovyfmt.toml in its directory or
 above it; a nested config replaces its parent's, nothing is merged.
@@ -66,8 +66,9 @@ Options:
                            exit 1 if there are any, so CI can't pass on unchecked files
       --force              Read every file named here as Groovy, whatever its name
                            (by default one that isn't *.groovy, *.gradle, *.gvy, *.gy,
-                           *.gsh, Jenkinsfile, Jenkinsfile.*, *.jenkinsfile or a
-                           groovy #! script is skipped)
+                           *.gsh, Jenkinsfile, Jenkinsfile.*, Jenkinsfile_*,
+                           Jenkinsfile-*, *.jenkinsfile or a groovy #! script is
+                           skipped)
       --diff               With --check, or --lint --fix: print a unified diff of the
                            changes (for git apply / patch -p1) and write nothing
       --lines <A-B>        Change only lines A to B (repeatable; one file or --stdin)
@@ -546,7 +547,7 @@ const NOT_UTF8: &str = "not valid UTF-8";
 static FORCE: AtomicBool = AtomicBool::new(false);
 
 /// Whether a file is Groovy by its name or first line: a name a directory walk takes
-/// (`is_groovy_file`), any pipeline name (`is_jenkinsfile`, even `Jenkinsfile.md`), or a script whose
+/// (`is_groovy_file`), any pipeline name (`is_jenkinsfile`, even `Jenkinsfile.md` or `Jenkinsfile_k8s.md`), or a script whose
 /// shebang runs groovy. Only files named on the command line can fail this; a Makefile or
 /// YAML file there (`groovyfmt *`) would parse as labels and lose its indentation.
 fn is_groovy(path: &Path, bytes: &[u8]) -> bool {

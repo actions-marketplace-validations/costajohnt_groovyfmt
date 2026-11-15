@@ -73,7 +73,7 @@ Also available: a [GitHub Action and pre-commit hooks](#ci-and-pre-commit). Not 
 | `groovyfmt --suggest-style` | suggest the indent settings that fit the existing code |
 | `groovyfmt --import-codenarc <file>` | turn a CodeNarc configuration into the `[lint]` table of a `.groovyfmt.toml` |
 
-Exit status is 0 when clean, 1 when there is something to fix, and 2 on errors. Paths can be files or directories. Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, `Jenkinsfile`, `Jenkinsfile.*` (when it parses as Groovy) and `*.jenkinsfile`.
+Exit status is 0 when clean, 1 when there is something to fix, and 2 on errors. Paths can be files or directories. Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*` and `Jenkinsfile-*` (when it parses as Groovy) and `*.jenkinsfile`.
 
 [Command line](https://github.com/costajohnt/groovyfmt/blob/main/docs/usage.md) has every option, which files are picked up, `--lines` and `--changed-since`.
 

@@ -118,10 +118,10 @@ Matching by name means an unused member can be missed when another file of the p
 
 These rules catch what the Declarative Pipeline plugin rejects when a build starts. They check a top-level `pipeline { }` in either of these:
 
-- a file named `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile`
+- a file named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` or `*.jenkinsfile`
 - any file whose first statement it is (after comments and imports)
 
-Scripted pipelines (`node { }`) are left alone. Directory walks find pipelines named `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile` ([which files](usage.md#which-files)); name other pipeline files on the command line, with `--force`.
+Scripted pipelines (`node { }`) are left alone. Directory walks find pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` or `*.jenkinsfile` ([which files](usage.md#which-files)); name other pipeline files on the command line, with `--force`.
 
 The section lists follow the [syntax reference](https://www.jenkins.io/doc/book/pipeline/syntax/), and the plugin's own parser where they differ.
 

@@ -13,7 +13,7 @@ The plugin starts <code>groovyfmt --lsp</code>, the language server built into t
   <li>optionally, <b>Reformat Code</b> (and so the Reformat code action on save) uses groovyfmt in place of the IDE's Groovy formatter</li>
 </ul>
 <p>It covers <code>*.groovy</code>, <code>*.gvy</code>, <code>*.gy</code>, <code>*.gsh</code>, <code>*.gradle</code>, <code>*.jenkinsfile</code>,
-<code>Jenkinsfile</code> and <code>Jenkinsfile.*</code>, and works alongside the bundled Groovy and Gradle support and any Jenkins plugin.</p>
+<code>Jenkinsfile</code>, <code>Jenkinsfile.*</code>, <code>Jenkinsfile_*</code> and <code>Jenkinsfile-*</code>, and works alongside the bundled Groovy and Gradle support and any Jenkins plugin.</p>
 <p>It runs the groovyfmt you installed (a path setting, the project's npm package, or <code>PATH</code>), or offers to download the
 release that matches its own version, checked against SHA-256 checksums packaged into the plugin when it was built. In an untrusted
 project nothing from the project decides which binary runs. No telemetry.</p>
@@ -27,7 +27,7 @@ project nothing from the project decides which binary runs. No telemetry.</p>
       <description><![CDATA[groovyfmt, the Groovy, Gradle and Jenkinsfile formatter and linter.]]></description>
     </server>
     <!-- by file name, whatever file type another plugin gives these files -->
-    <fileNamePatternMapping patterns="*.groovy;*.gvy;*.gy;*.gsh;*.gradle;*.jenkinsfile;Jenkinsfile;Jenkinsfile.*"
+    <fileNamePatternMapping patterns="*.groovy;*.gvy;*.gy;*.gsh;*.gradle;*.jenkinsfile;Jenkinsfile;Jenkinsfile.*;Jenkinsfile_*;Jenkinsfile-*"
                             serverId="groovyfmt" languageId="groovy"/>
   </extensions>
 
