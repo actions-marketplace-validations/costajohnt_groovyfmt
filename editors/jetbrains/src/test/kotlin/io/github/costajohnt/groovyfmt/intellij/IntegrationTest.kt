@@ -15,6 +15,7 @@ import com.intellij.testFramework.fixtures.IdeaTestFixtureFactory
 import com.intellij.testFramework.fixtures.impl.TempDirTestFixtureImpl
 import com.redhat.devtools.lsp4ij.LanguageServerManager
 import com.redhat.devtools.lsp4ij.LanguageServersRegistry
+import com.redhat.devtools.lsp4ij.LanguageServiceAccessor
 import com.redhat.devtools.lsp4ij.ServerStatus
 import com.redhat.devtools.lsp4ij.server.definition.launching.UserDefinedLanguageServerDefinition
 import com.redhat.devtools.lsp4ij.templates.ServerMappingSettings
@@ -46,26 +47,41 @@ class IntegrationTest : UsefulTestCase() {
     override fun tearDown() {
         try {
             GroovyfmtSettings.get().apply {
-                enabled = true
+                enabled = false
                 path = null
                 useForReformatCode = false
             }
-            // the server's process and its reader threads end before the leak check runs
+            // The server's process and its reader threads end before the leak check runs. The
+            // plugin turns itself off: after a bare LSP4IJ stop it still has a binary, and
+            // LSP4IJ starts the server again for the open file.
+            fixture.project.service<GroovyfmtService>().restart().get(30, TimeUnit.SECONDS)
             val manager = LanguageServerManager.getInstance(fixture.project)
-            manager.stop(SERVER_ID, LanguageServerManager.StopOptions().setWillDisable(false))
-            val end = System.currentTimeMillis() + 30_000
             // a server process still running: the threads reading its output
             fun serverThreads() = Thread.getAllStackTraces().keys.count { it.isAlive && it.name.startsWith("BaseDataReader") && it.name.contains(" --lsp") }
-            while ((manager.getServerStatus(SERVER_ID).let { it != ServerStatus.stopped && it != ServerStatus.none } || serverThreads() > 0) &&
-                System.currentTimeMillis() < end
-            ) {
-                PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
-                Thread.sleep(100)
+            fun running() = manager.getServerStatus(SERVER_ID).let { it != ServerStatus.stopped && it != ServerStatus.none } || serverThreads() > 0
+            fun waitStopped(timeoutMs: Long) {
+                val end = System.currentTimeMillis() + timeoutMs
+                while (running() && System.currentTimeMillis() < end) {
+                    PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
+                    Thread.sleep(100)
+                }
+            }
+            waitStopped(10_000)
+            // LSP4IJ loses a process it launches while it stops the server (a start's process
+            // appears after the stop looked for it), and that process runs on unknown to it.
+            // Ended here, so it can't hold up or confuse the next tests.
+            if (running()) {
+                ProcessHandle.current().descendants().filter { it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }.forEach {
+                    System.err.println("$name: ending a language server process LSP4IJ lost: ${it.pid()} ${it.info().command().orElse("?")}")
+                    it.destroyForcibly()
+                }
+                waitStopped(20_000)
             }
             fixture.tearDown()
         } catch (e: Throwable) {
             addSuppressedException(e)
         } finally {
+            GroovyfmtSettings.get().enabled = true
             super.tearDown()
         }
     }
@@ -271,17 +287,24 @@ class IntegrationTest : UsefulTestCase() {
         Files.copy(File(a).toPath(), b.toPath())
         b.setExecutable(true)
         expectServerThreads(b.path)
+        // The process LSP4IJ runs the server in. Not any process running the binary: LSP4IJ can
+        // lose a process it launches while it stops the server, and one of those, left running,
+        // is not the server.
+        fun server(): ProcessHandle? = LanguageServiceAccessor.getInstance(fixture.project).startedServers
+            .firstOrNull { it.serverDefinition.id == SERVER_ID && it.serverStatus == ServerStatus.started }
+            ?.currentProcessId?.let { ProcessHandle.of(it).orElse(null) }?.takeIf { it.isAlive }
         // the OS reports the resolved executable, so compare canonical paths
-        fun serving(path: String) = ProcessHandle.allProcesses().anyMatch { p ->
-            p.isAlive && p.info().command().map { File(it).canonicalPath }.orElse("") == File(path).canonicalPath &&
-                p.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp"))
-        }
+        fun runs(p: ProcessHandle?, path: String) = p != null &&
+            p.info().command().map { File(it).canonicalPath }.orElse("") == File(path).canonicalPath &&
+            p.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp"))
         GroovyfmtSettings.get().path = a
         open()
         val service = fixture.project.service<GroovyfmtService>()
         service.restart().get(30, TimeUnit.SECONDS)
+        var serverA: ProcessHandle? = null
         waitFor("the server to run A", 60_000) {
-            LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID) == ServerStatus.started && serving(a)
+            serverA = server()
+            runs(serverA, a)
         }
         GroovyfmtSettings.get().path = b.path
         val first = service.restart()
@@ -289,7 +312,7 @@ class IntegrationTest : UsefulTestCase() {
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
         waitFor("the server to run B in place of A", 60_000) {
-            LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID) == ServerStatus.started && serving(b.path) && !serving(a)
+            runs(server(), b.path) && !serverA!!.isAlive
         }
     }
 
