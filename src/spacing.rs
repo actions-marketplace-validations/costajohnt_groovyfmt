@@ -38,6 +38,9 @@ struct Gap {
     end: usize,
     want: Want,
     rule: &'static str,
+    /// for the gap before a map key's or named argument's `:`, its map or argument list
+    /// (start byte, start row) and the row its entry starts on
+    group: Option<(usize, usize, usize)>,
 }
 
 /// A leaf token: a node without children, or a whole string or comment.
@@ -106,11 +109,22 @@ fn gaps(src: &str, tree: &Tree) -> Vec<Gap> {
                         .all(|b| matches!(b, b' ' | b'\t'))
                 {
                     let (want, rule) = want(a, &tok, &anc, src);
+                    let group = match anc.as_slice() {
+                        [.., (list, ..), (entry, ..)] if rule == "colon" && want == Want::Zero => {
+                            Some((
+                                list.start_byte(),
+                                list.start_position().row,
+                                entry.start_position().row,
+                            ))
+                        }
+                        _ => None,
+                    };
                     out.push(Gap {
                         start: s,
                         end: e,
                         want,
                         rule,
+                        group,
                     });
                 }
             }
@@ -540,6 +554,8 @@ struct GapInfo {
     ch: char,
     /// a comment follows the gap
     comment: bool,
+    /// a key's `:` whose group broke (see `loosen`): never kept as alignment
+    loose: Cell<bool>,
 }
 
 /// Lay out `row` from its gaps' widths in `base`: the first `freeze` gaps stay as they are;
@@ -584,6 +600,7 @@ fn lay(
         };
         let ch = at.ch;
         let aligned = ruled != w
+            && !at.loose.get()
             && !forced.is_some_and(|f| f[k].get())
             && ((w == 1
                 && ruled == 0
@@ -707,6 +724,7 @@ fn respace_capped(
                 tab: x.want == Want::Keep && src[x.start..x.end].contains('\t'),
                 ch: after.chars().next().unwrap_or(' '),
                 comment: after.starts_with("//") || after.starts_with("/*"),
+                loose: Cell::new(false),
             }
         })
         .collect();
@@ -795,6 +813,7 @@ fn respace_capped(
         of_line[r.line] = Some(k);
     }
     let forced: Vec<Cell<bool>> = gaps.iter().map(|_| Cell::new(false)).collect();
+    let groups = key_groups(&gaps, &rows);
     // each row's gaps' current widths, and the gap after which it is frozen
     let mut current = source.clone();
     let mut freeze = vec![usize::MAX; rows.len()];
@@ -812,6 +831,7 @@ fn respace_capped(
         let now: Vec<Layout> = (0..rows.len())
             .map(|k| lay(&rows[k], here(k), &current[k], usize::MAX, None, &[]))
             .collect();
+        let mut changed = loosen(&groups, &info, &now);
         // the columns where a token stays put with every gap of its line as its rule wants
         let fixed: Vec<Vec<bool>> = grid
             .iter()
@@ -843,7 +863,6 @@ fn respace_capped(
             .map(|k| lay(&rows[k], here(k), &current[k], 0, None, &near_of(k)))
             .collect();
         let cands = candidates(&rows, &info, &current, &now, &free, &near, &grid, &of_line);
-        let mut changed = false;
         for k in 0..rows.len() {
             let below = cands[k]
                 .iter()
@@ -881,6 +900,61 @@ fn respace_capped(
         lines[r.line].0.clone_from(&original[k]);
     }
     false
+}
+
+/// A key's `:` gap: its index in `gaps`, its row, and its index among the row's gaps.
+type Key = (usize, usize, usize);
+
+/// The keys of each map or argument list whose first entry is on the line of its `[` or `(`
+/// and some other entry on a later line: the first key, and the keys on later lines.
+/// Re-indenting moves the later lines and not the first, so their keys may no longer line up
+/// with the first.
+fn key_groups(gaps: &[Gap], rows: &[Row]) -> Vec<(Key, Vec<Key>)> {
+    let mut at = vec![None; gaps.len()];
+    for (k, r) in rows.iter().enumerate() {
+        for g in r.gaps.clone() {
+            at[g] = Some((g, k, g - r.gaps.start));
+        }
+    }
+    let mut by_list: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+    for (g, x) in gaps.iter().enumerate() {
+        if let Some((list, ..)) = x.group {
+            by_list.entry(list).or_default().push(g);
+        }
+    }
+    let mut out = Vec::new();
+    for keys in by_list.into_values() {
+        let (Some((_, row, first)), Some(lead)) = (gaps[keys[0]].group, at[keys[0]]) else {
+            continue;
+        };
+        let later: Vec<Key> = keys[1..]
+            .iter()
+            .filter(|&&g| gaps[g].group.is_some_and(|(.., r)| r > row))
+            .filter_map(|&g| at[g])
+            .collect();
+        if first == row && !later.is_empty() {
+            out.push((lead, later));
+        }
+    }
+    out
+}
+
+/// Marks `loose` every key of a group whose first key's `:` lines up with no later key's `:`
+/// in the current text (`now`), so no key of it keeps padding as alignment, rather than the
+/// later keys staying lined up with each other and the first not. Whether anything newly
+/// became loose.
+fn loosen(groups: &[(Key, Vec<Key>)], info: &[GapInfo], now: &[Layout]) -> bool {
+    let col = |&(_, k, i): &Key| now[k].cols[i];
+    let mut changed = false;
+    for (lead, later) in groups {
+        if !info[lead.0].loose.get() && later.iter().all(|x| col(x) != col(lead)) {
+            for (g, ..) in std::iter::once(lead).chain(later) {
+                info[*g].loose.set(true);
+            }
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// For each row, the gaps it may be frozen after, judged from the current text alone: the
@@ -1192,6 +1266,33 @@ mod tests {
         );
         // each run is judged on its own: the `=` column stays, the run after it goes
         assert_eq!(fmt("x  = 1\nyy = 2\nz  =  3\n"), "x  = 1\nyy = 2\nz  = 3\n");
+    }
+
+    #[test]
+    fn keys_lined_up_with_a_first_key_on_the_bracket_line() {
+        // re-indenting moves the later keys out of the first key's column: none stays padded
+        // (issue #123, from a skill definition's map)
+        check(&[
+            (
+                "foo([projectId  : 1,\n     subjectId  : 2,\n     description: 3])",
+                "foo([projectId: 1,\n    subjectId: 2,\n    description: 3])",
+            ),
+            (
+                "x = [projectId  : 1,\n     subjectId  : 2,\n     description: 3]",
+                "x = [projectId: 1,\n    subjectId: 2,\n    description: 3]",
+            ),
+            // an unpadded first key the later keys don't line up with
+            (
+                "foo([description: 3,\n     subjectId  : 2,\n     projectId  : 1])",
+                "foo([description: 3,\n    subjectId: 2,\n    projectId: 1])",
+            ),
+        ]);
+        // the first key still lines up after re-indenting: the group stays aligned
+        let kept = "foo(projectId  : 1,\n    subjectId  : 2,\n    description: 3)\n";
+        assert_eq!(fmt(kept), kept);
+        // maps on one line each, lined up across lines, aren't a group of their own
+        let table = "x = [\n    [a  : 1, bb : 2],\n    [ccc: 3, d  : 4],\n]\n";
+        assert_eq!(fmt(table), table);
     }
 
     #[test]
