@@ -67,7 +67,17 @@ async function trusted(): Promise<void> {
   assert.ok(semi, `no UnnecessarySemicolon in ${JSON.stringify(ds.map((d) => d.code))}`);
   assert.equal(semi.range.start.line, 2);
 
-  await vscode.commands.executeCommand('editor.action.formatDocument');
+  // The formatter for this document, not editor.action.formatDocument: that formats whichever
+  // editor has focus, and VS Code's chat view can take focus at startup, after
+  // showTextDocument, which left A.groovy unformatted.
+  const edits = await vscode.commands.executeCommand<vscode.TextEdit[]>('vscode.executeFormatDocumentProvider', uri, {
+    tabSize: 4,
+    insertSpaces: true,
+  });
+  assert.ok(edits?.length, 'no formatting edits for A.groovy');
+  const format = new vscode.WorkspaceEdit();
+  format.set(uri, edits);
+  assert.ok(await vscode.workspace.applyEdit(format));
   assert.equal(doc.getText(), 'class A {\n    def f() {\n        println 1;\n    }\n}\n');
 
   const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
