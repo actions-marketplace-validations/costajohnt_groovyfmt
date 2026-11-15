@@ -133,6 +133,24 @@ class IntegrationTest : UsefulTestCase() {
         assertTrue(file.virtualFile.isInLocalFileSystem)
     }
 
+    /**
+     * Waits for the server to start for the open file, then highlights the file. The IDE
+     * highlights an open editor by itself, which connects the file to the server; a test has to
+     * ask, and only with the server's start behind it. LSP4IJ starts a server for a file it opens
+     * but does not always connect the file then (no textDocument/didOpen reaches the server, so no
+     * diagnostics ever arrive, #138); highlighting connects it.
+     */
+    private fun highlightOnceStarted(serverId: String) {
+        waitFor("the server $serverId to start", 60_000) {
+            LanguageServerManager.getInstance(fixture.project).getServerStatus(serverId) == ServerStatus.started
+        }
+        repeat(10) {
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
+            Thread.sleep(100)
+        }
+        fixture.doHighlighting()
+    }
+
     /** LSP4IJ puts diagnostics straight into the document's markup, outside the highlighting passes. */
     private fun waitForSemicolonDiagnostic(): HighlightInfo {
         var semicolon: HighlightInfo? = null
@@ -153,16 +171,7 @@ class IntegrationTest : UsefulTestCase() {
         assertEquals(bin, fixture.project.service<GroovyfmtService>().binary?.path)
 
         // the server starts for the open file, and a lint diagnostic arrives
-        waitFor("the server to start", 60_000) {
-            LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID) == ServerStatus.started
-        }
-        repeat(10) {
-            PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
-            Thread.sleep(100)
-        }
-        // the IDE highlights an open editor by itself, which connects the file to the server; a
-        // test has to ask (and only now, with the server's start behind it)
-        fixture.doHighlighting()
+        highlightOnceStarted(SERVER_ID)
         val semicolon = waitForSemicolonDiagnostic()
         assertEquals(HighlightSeverity.WARNING, semicolon.severity)
         assertEquals(2, fixture.editor.document.getLineNumber(semicolon.startOffset))
@@ -311,9 +320,17 @@ class IntegrationTest : UsefulTestCase() {
         val second = service.restart()
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
+        var serverB: ProcessHandle? = null
         waitFor("the server to run B in place of A", 60_000) {
-            runs(server(), b.path) && !serverA!!.isAlive
+            serverB = server()
+            runs(serverB, b.path) && !serverA!!.isAlive
         }
+        // and no other groovyfmt --lsp runs: the second restart's stop didn't land in the first
+        // one's start, where LSP4IJ 0.21.0 loses the process it launches (#97)
+        val others = ProcessHandle.current().descendants()
+            .filter { it.isAlive && it.pid() != serverB!!.pid() && it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }
+            .map { "${it.pid()} ${it.info().command().orElse("?")}" }.toList()
+        assertEquals(listOf<String>(), others)
     }
 
     /** A binary that never reads its input can't hang Reformat with groovyfmt: the timeout kills it. */
@@ -359,6 +376,7 @@ class IntegrationTest : UsefulTestCase() {
             open()
             restart()
             assertNull(fixture.project.service<GroovyfmtService>().binary)
+            highlightOnceStarted(definition.id)
             waitForSemicolonDiagnostic()
             fixture.performEditorAction(IdeActions.ACTION_EDITOR_REFORMAT)
             waitFor("Reformat Code to use the user-defined server", 30_000) { fixture.editor.document.text == FORMATTED }

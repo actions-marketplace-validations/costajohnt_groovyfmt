@@ -32,6 +32,7 @@ import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiFile
 import com.intellij.util.EnvironmentUtil
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.concurrency.SequentialTaskExecutor
 import com.redhat.devtools.lsp4ij.LanguageServerEnablementSupport
 import com.redhat.devtools.lsp4ij.LanguageServerFactory
@@ -46,6 +47,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.Properties
 import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 const val SERVER_ID = "groovyfmt"
@@ -107,8 +109,8 @@ class GroovyfmtService(val project: Project) : Disposable {
 
     /**
      * Finds the binary again and restarts the server if it changed, or always with `force`
-     * (Restart groovyfmt). Restarting a server that is still starting can leave its process
-     * behind, so a running or starting server already launched from this binary is left alone.
+     * (Restart groovyfmt). A running or starting server already launched from this binary is
+     * left alone.
      */
     fun restart(force: Boolean = false): Future<*> = queue.submit {
         if (project.isDisposed) return@submit
@@ -118,18 +120,31 @@ class GroovyfmtService(val project: Project) : Disposable {
         val found = resolve()
         binary = found
         // on the UI thread, once the IDE isn't indexing
-        DumbService.getInstance(project).smartInvokeLater {
-            // A later restart may have changed the binary since: then this step is stale, and
-            // starting the server could find the plugin turned off.
-            if (project.isDisposed || binary !== found) return@smartInvokeLater
-            val manager = LanguageServerManager.getInstance(project)
-            val running = manager.getServerStatus(SERVER_ID).let { it == ServerStatus.started || it == ServerStatus.starting }
-            if (!force && found != null && found == launched && running) return@smartInvokeLater
-            // a plain stop: LSP4IJ's default stop also turns the server off
-            manager.stop(SERVER_ID, LanguageServerManager.StopOptions().setWillDisable(false))
-            // starts it for the open files groovyfmt serves, if there are any
-            if (found != null && !stoppedInLsp4ij) manager.start(SERVER_ID)
+        DumbService.getInstance(project).smartInvokeLater { applyRestart(found, force, 0) }
+    }
+
+    /** [restart]'s step on the UI thread: stops the server and starts it with `found`. */
+    private fun applyRestart(found: Found?, force: Boolean, tries: Int) {
+        // A later restart may have changed the binary since: then this step is stale, and
+        // starting the server could find the plugin turned off.
+        if (project.isDisposed || binary !== found) return
+        val manager = LanguageServerManager.getInstance(project)
+        val status = manager.getServerStatus(SERVER_ID)
+        // LSP4IJ 0.21.0 loses the process of a start that a stop lands in, and it runs on until
+        // the IDE exits (#97). So a stop waits for a start or stop in flight to finish first,
+        // up to 30 s. A start LSP4IJ has queued but not yet begun is still missed.
+        if ((status == ServerStatus.starting || status == ServerStatus.stopping) && tries < 300) {
+            AppExecutorUtil.getAppScheduledExecutorService().schedule({
+                if (!project.isDisposed) DumbService.getInstance(project).smartInvokeLater { applyRestart(found, force, tries + 1) }
+            }, 100, TimeUnit.MILLISECONDS)
+            return
         }
+        val running = status == ServerStatus.started || status == ServerStatus.starting
+        if (!force && found != null && found == launched && running) return
+        // a plain stop: LSP4IJ's default stop also turns the server off
+        manager.stop(SERVER_ID, LanguageServerManager.StopOptions().setWillDisable(false))
+        // starts it for the open files groovyfmt serves, if there are any
+        if (found != null && !stoppedInLsp4ij) manager.start(SERVER_ID)
     }
 
     /** The binary the server was last launched from, set when LSP4IJ starts its process. */

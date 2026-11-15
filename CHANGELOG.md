@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- JetBrains plugin: changing the groovyfmt path (or Restart groovyfmt) while the language server was still starting or stopping could leave an orphaned `groovyfmt --lsp` running until the IDE exited, a race in LSP4IJ 0.21.0 that loses a process a stop lands in. The plugin now waits for a start or stop in flight to finish before it restarts the server. ([#97](https://github.com/costajohnt/groovyfmt/issues/97))
+
 ## 0.18.0 (2026-11-15)
 
 ### Added
