@@ -1098,6 +1098,19 @@ fn explain_describes_one_rule() {
         "{}",
         stdout(&o)
     );
+    // #117: the DSL delegate case and its suppression
+    for (rule, kind) in [
+        ("UnusedPrivateMethod", "Method"),
+        ("UnusedPrivateField", "Field"),
+    ] {
+        let o = run(&d.0, &["--explain", rule], None);
+        let want = format!("`@SuppressWarnings('UnusedPrivate{kind}')`");
+        assert!(
+            stdout(&o).contains("DelegatingScript") && stdout(&o).contains(&want),
+            "{}",
+            stdout(&o)
+        );
+    }
     let o = run(&d.0, &["--explain", "Nope"], None);
     assert_eq!(o.status.code(), Some(2));
     assert!(

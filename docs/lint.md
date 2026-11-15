@@ -115,6 +115,8 @@ The project is the nearest directory at or above the file holding `.git` or a co
 
 Matching by name means an unused member can be missed when another file of the project uses the same name for something else.
 
+A private member used only by a DSL script evaluated with the class as its delegate (a `DelegatingScript`, a builder) is reported, since nothing in Groovy code names it: the script calls it bare. Removing it breaks the script, so mark it `@SuppressWarnings('UnusedPrivateMethod')` or `@SuppressWarnings('UnusedPrivateField')`, or put that on the class to cover all its members. `--explain` says the same.
+
 ### Jenkinsfiles
 
 These rules catch what the Declarative Pipeline plugin rejects when a build starts. They check a top-level `pipeline { }` in either of these:

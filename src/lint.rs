@@ -482,7 +482,7 @@ pub const RULES: &[Rule] = &[
         name: "UnusedPrivateField",
         default: true,
         description: "a private field whose name appears nowhere else in the file, nor in another file of the project that names its class (not one with an annotation, serialVersionUID, or in a class whose annotation reads fields)",
-        why: "A private field nothing reads is dead state: left over from a refactoring, or a sign that the code meant to use it doesn't.",
+        why: "A private field nothing reads is dead state: left over from a refactoring, or a sign that the code meant to use it doesn't. A private member used only by a DSL script run with the class as its delegate (a `DelegatingScript`, a builder) looks unused here; mark it `@SuppressWarnings('UnusedPrivateField')` (or the class, for all of them), since removing it breaks the script.",
         bad: "class Client {\n    private int retries = 3\n    def get(url) { url.toURL().text }\n}",
         good: "class Client {\n    def get(url) { url.toURL().text }\n}",
         fixable: false,
@@ -491,7 +491,7 @@ pub const RULES: &[Rule] = &[
         name: "UnusedPrivateMethod",
         default: true,
         description: "a private method whose name appears nowhere else in the file (for getX/isX/setX, nor the property x), nor in another file of the project that names its class",
-        why: "A private method nothing calls is dead code that still has to be read and maintained.",
+        why: "A private method nothing calls is dead code that still has to be read and maintained. A private member used only by a DSL script run with the class as its delegate (a `DelegatingScript`, a builder) looks unused here; mark it `@SuppressWarnings('UnusedPrivateMethod')` (or the class, for all of them), since removing it breaks the script.",
         bad: "class Client {\n    def get(url) { url.toURL().text }\n    private String trimmed(s) { s.trim() }\n}",
         good: "class Client {\n    def get(url) { url.toURL().text }\n}",
         fixable: false,
@@ -992,9 +992,8 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
         if name.ends_with('*') || full.ends_with(".*") || annotated {
             continue;
         }
-        let symbol = d
-            .child_by_field_name("alias")
-            .map_or_else(|| name.rsplit('.').next().unwrap_or(name), |a| text(a, src));
+        let alias = d.child_by_field_name("alias").map(|a| text(a, src));
+        let symbol = alias.unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name));
         // `import static a.B.getFoo` also serves the property `foo` (Groovy's
         // StaticImportVisitor looks up getFoo / setFoo for it)
         let property_used = full.starts_with("import static ")
@@ -1005,7 +1004,12 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
                 ..at(
                     d,
                     "UnusedImport",
-                    format!("The [{name}] import is never referenced"),
+                    match alias {
+                        Some(a) => {
+                            format!("The alias [{a}] of the [{name}] import is never referenced")
+                        }
+                        None => format!("The [{name}] import is never referenced"),
+                    },
                 )
             });
         }
@@ -1435,6 +1439,19 @@ mod tests {
         // a `$` in a single-quoted string is text
         let src = "import a.X\ndef s = '''\n\"${X}\"\n'''\n";
         assert_eq!(rules(src), vec![("UnusedImport", 1)]);
+    }
+
+    #[test]
+    fn unused_aliased_import_names_the_alias() {
+        let v = lint("import a.B as C\nimport a.D\n").unwrap();
+        let got: Vec<_> = v.iter().map(|v| v.message.as_str()).collect();
+        assert_eq!(
+            got,
+            vec![
+                "The alias [C] of the [a.B] import is never referenced",
+                "The [a.D] import is never referenced"
+            ]
+        );
     }
 
     #[test]
