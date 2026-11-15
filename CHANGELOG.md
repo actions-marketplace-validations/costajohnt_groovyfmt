@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Default mode keeps tab-aligned columns when it re-indents a line by other than a whole tab stop: a tab between two tokens on such a line becomes the spaces up to its tab stop of the line as written, the same tabs and spaces `normalize_spacing` expands. Running `normalize_spacing` on default-formatted output now gives what it gives on the original, instead of splitting a tab-aligned map into two columns or collapsing it. Lines with no tab after their indent, and lines whose indent moves by whole tab stops, are unchanged; tabs in strings and comments and before a trailing comment stay. ([#133](https://github.com/costajohnt/groovyfmt/issues/133))
+- `--explain UnusedPrivateMethod` and `--explain UnusedPrivateField` cover a private member used only by a DSL script that runs with the class as its delegate (`DelegatingScript`, a builder), and recommend `@SuppressWarnings('UnusedPrivateMethod')` / `('UnusedPrivateField')` on the member or class. UnusedImport on an aliased import (`import a.B as C`) names the alias: `The alias [C] of the [a.B] import is never referenced`. ([#117](https://github.com/costajohnt/groovyfmt/issues/117))
+
 ## 0.18.0 (2026-11-15)
 
 ### Added

@@ -700,21 +700,39 @@ pub(crate) fn respace(
 }
 
 /// Columns `s` takes from column `col`, a tab reaching the next multiple of `tab`.
-fn width_at(s: &str, col: usize, tab: usize) -> usize {
+pub(crate) fn width_at(s: &str, col: usize, tab: usize) -> usize {
     s.chars().fold(
         col,
         |c, ch| if ch == '\t' { c + tab - c % tab } else { c + 1 },
     ) - col
 }
 
-fn respace_capped(
+/// Default mode's half of `respace` (#133): on each line of `bodies` (the caller passes only
+/// lines whose indent moved by other than a multiple of `tab`), every tab between tokens that
+/// `respace` would also turn into spaces does so here, to its tab stop of the line as written,
+/// so tab-aligned columns survive the new indent and `normalize_spacing` run on the result
+/// sees the same widths as it does on the original. Tabs in gaps left as written (before a
+/// comment, `a\t.b()`, a `where:` table) and inside strings and comments stay.
+pub(crate) fn expand_tabs(
     src: &str,
     tree: &Tree,
     lines: &mut [(String, &str)],
     bodies: &[Option<(usize, usize)>],
     tab: usize,
-    max_sweeps: usize,
-) -> bool {
+) {
+    let (gaps, info, rows, source) = prepare(src, tree, lines, bodies, tab);
+    expand(src, lines, &gaps, &info, &rows, &source);
+}
+
+/// The gaps, what `lay` needs about each, the lines that may change, and each of their gaps'
+/// widths as written.
+fn prepare<'s>(
+    src: &'s str,
+    tree: &Tree,
+    lines: &[(String, &str)],
+    bodies: &[Option<(usize, usize)>],
+    tab: usize,
+) -> (Vec<Gap>, Vec<GapInfo>, Vec<Row<'s>>, Vec<Vec<usize>>) {
     let gaps = gaps(src, tree);
     let info: Vec<GapInfo> = gaps
         .iter()
@@ -764,7 +782,6 @@ fn respace_capped(
             });
         }
     }
-    let original: Vec<String> = rows.iter().map(|r| lines[r.line].0.clone()).collect();
     // each gap's width in columns, a tab reaching the next tab stop of the line as written,
     // before it was re-indented (a kept tab gap counts as written, a column per character, as
     // the sweeps see it)
@@ -787,8 +804,19 @@ fn respace_capped(
                 .collect()
         })
         .collect();
-    // any other tab between tokens becomes spaces to its tab stop before the sweeps, so they
-    // see a run as wide as it looked
+    (gaps, info, rows, source)
+}
+
+/// Any tab between tokens not left as written becomes spaces to its tab stop, so a run is as
+/// wide as it looked.
+fn expand(
+    src: &str,
+    lines: &mut [(String, &str)],
+    gaps: &[Gap],
+    info: &[GapInfo],
+    rows: &[Row],
+    source: &[Vec<usize>],
+) {
     for (k, r) in rows.iter().enumerate() {
         let (gs, inf) = (&gaps[r.gaps.clone()], &info[r.gaps.clone()]);
         if gs
@@ -799,6 +827,20 @@ fn respace_capped(
             lines[r.line].0 = text_of(r, gs, inf, src, &source[k]);
         }
     }
+}
+
+fn respace_capped(
+    src: &str,
+    tree: &Tree,
+    lines: &mut [(String, &str)],
+    bodies: &[Option<(usize, usize)>],
+    tab: usize,
+    max_sweeps: usize,
+) -> bool {
+    let (gaps, info, rows, source) = prepare(src, tree, lines, bodies, tab);
+    let original: Vec<String> = rows.iter().map(|r| lines[r.line].0.clone()).collect();
+    // tabs become spaces before the sweeps, so they see a run as wide as it looked
+    expand(src, lines, &gaps, &info, &rows, &source);
     // indents don't change, so neither do the lines each line is compared with
     let near: Vec<Vec<usize>> = rows
         .iter()
