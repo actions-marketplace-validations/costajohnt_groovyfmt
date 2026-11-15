@@ -7,37 +7,37 @@
   description: Format Groovy, Gradle and Jenkinsfile sources in place
   entry: groovyfmt
   language: system
-  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$
 - id: groovyfmt-check
   name: groovyfmt --check
   description: Fail if Groovy, Gradle or Jenkinsfile sources need formatting
   entry: groovyfmt --check
   language: system
-  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$
 - id: groovyfmt-lint
   name: groovyfmt --lint
   description: Report lint violations in Groovy, Gradle and Jenkinsfile sources
   entry: groovyfmt --lint
   language: system
-  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$
 - id: groovyfmt-source
   name: groovyfmt
   description: Format Groovy, Gradle and Jenkinsfile sources in place (built from source)
   entry: groovyfmt
   language: rust
   minimum_pre_commit_version: 2.21.0
-  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$
 - id: groovyfmt-check-source
   name: groovyfmt --check
   description: Fail if Groovy, Gradle or Jenkinsfile sources need formatting (built from source)
   entry: groovyfmt --check
   language: rust
   minimum_pre_commit_version: 2.21.0
-  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$
 - id: groovyfmt-lint-source
   name: groovyfmt --lint
   description: Report lint violations in Groovy, Gradle and Jenkinsfile sources (built from source)
   entry: groovyfmt --lint
   language: rust
   minimum_pre_commit_version: 2.21.0
-  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+  files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$

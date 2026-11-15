@@ -1913,6 +1913,79 @@ fn a_build_package_under_src_is_source_and_gradle_output_is_not() {
 }
 
 #[test]
+fn a_src_directory_above_the_project_does_not_make_its_output_source() {
+    // a project kept under `src` (`~/src/proj`), whose subprojects have no build file of the
+    // standard name: their output is still skipped
+    let d = Dir::new("srcabove");
+    d.write("src/proj/settings.gradle", "include 'sub', 'app'\n");
+    d.write("src/proj/build.gradle", "");
+    d.write("src/proj/app/app.gradle", "");
+    d.write("src/proj/sub/build/resources/main/logback.groovy", UGLY);
+    d.write("src/proj/app/build/resources/main/s.groovy", UGLY);
+    // a package named build, with a `tmp` package of its own, in a project with no build file
+    d.write("w/proj/lib/src/main/groovy/org/acme/build/B.groovy", UGLY);
+    d.write(
+        "w/proj/lib/src/main/groovy/org/acme/build/tmp/T.groovy",
+        UGLY,
+    );
+    d.write(
+        "src/proj/lib/src/main/groovy/org/acme/build/tmp/U.groovy",
+        UGLY,
+    );
+    let o = run(&d.0, &["--check"], None);
+    assert_eq!(
+        stdout(&o),
+        "src/proj/lib/src/main/groovy/org/acme/build/tmp/U.groovy\nw/proj/lib/src/main/groovy/org/acme/build/B.groovy\nw/proj/lib/src/main/groovy/org/acme/build/tmp/T.groovy\n"
+    );
+    let o = run(&d.0.join("src/proj"), &["--check", "."], None);
+    assert_eq!(
+        stdout(&o),
+        "lib/src/main/groovy/org/acme/build/tmp/U.groovy\n"
+    );
+}
+
+#[test]
+fn a_walk_takes_a_jenkinsfile_with_a_suffix_only_when_it_parses() {
+    let d = Dir::new("jsuffix");
+    d.write(".groovyfmt.toml", "normalize_spacing = true\n");
+    let files = [
+        ("Jenkinsfile.disabled", "pipeline {\n    agent any\n}\n"),
+        (
+            "Jenkinsfile.j2",
+            "pipeline {\n  stages {\n{% for s in stages %}\n    stage('{{ s }}') { }\n{% endfor %}\n  }\n}\n",
+        ),
+        (
+            "Jenkinsfile.patch",
+            "--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1,3 +1,3 @@\n pipeline {\n-  agent any\n+  agent none\n }\n",
+        ),
+        (
+            "Jenkinsfile.vars",
+            "{% set x = 1 %}\npipeline { agent any }\n",
+        ),
+        ("Jenkinsfile.groovy~", "pipeline {\nagent  any\n}\n"),
+        ("Jenkinsfile.prod", "pipeline {\nagent any\n}\n"),
+    ];
+    for (f, text) in files {
+        d.write(f, text);
+    }
+    let o = run(&d.0, &["--syntax", "."], None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = run(&d.0, &["--check", "-v", "."], None);
+    assert_eq!(stdout(&o), "Jenkinsfile.prod\n");
+    assert!(!stderr(&o).contains("Jenkinsfile.vars"), "{}", stderr(&o));
+    run(&d.0, &["."], None);
+    run(&d.0, &["--lint", "--fix", "."], None);
+    for (f, text) in files {
+        if f != "Jenkinsfile.prod" {
+            assert_eq!(d.read(f), text, "{f}");
+        }
+    }
+    // named on the command line, it is taken whatever it holds
+    let o = run(&d.0, &["--syntax", "Jenkinsfile.vars"], None);
+    assert_ne!(o.status.code(), Some(0));
+}
+
+#[test]
 fn discovers_pipelines_named_like_the_editors_do() {
     let d = Dir::new("pipelines");
     for f in [

@@ -21,10 +21,10 @@ Usage: groovyfmt [OPTIONS] [PATH]...
 
 PATHs are files or directories (default: the current directory). Directories are
 searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, Jenkinsfile.*
-and *.jenkinsfile, skipping hidden directories, out, target, node_modules, build
-(except a package named build under src that isn't build output), and anything
-matching the config file's `exclude` patterns (which also apply to files named
-here).
+(if it parses) and *.jenkinsfile, skipping hidden directories, out, target,
+node_modules, build (except a package named build under a src directory within
+its project), and anything matching the config file's `exclude` patterns (which
+also apply to files named here).
 Each file uses the nearest .groovyfmt.toml / groovyfmt.toml in its directory or
 above it; a nested config replaces its parent's, nothing is merged.
 
@@ -391,7 +391,7 @@ fn walk(
     let wanted = if meta.is_dir() {
         top || !groovyfmt::is_skipped_dir(p)
     } else {
-        meta.is_file() && (top || groovyfmt::is_groovy_file(p))
+        meta.is_file() && (top || groovyfmt::is_walked_file(p))
     };
     if !wanted {
         return;
