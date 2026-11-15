@@ -65,6 +65,17 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                             .unwrap_or(t.len());
                         declared.insert(t[..end].to_string());
                     }
+                    // a name the block reads makes it too, as Gradle runs it:
+                    // `integrationTestRuntime.extendsFrom testRuntime` (#145)
+                    crate::preorder(b, |x| {
+                        if x.kind() == "identifier"
+                            && x.parent()
+                                .is_none_or(|p| p.child_by_field_name("field") != Some(x))
+                        {
+                            declared.insert(text(x, src).to_string());
+                        }
+                        true
+                    });
                 }
                 _ => {}
             }
@@ -674,6 +685,27 @@ mod tests {
         // configuration, a build's own uploadArchives task, an id outside plugins { }
         let src = "def archiveName = 'x'\ndependencies {\n    implementation('a:b:1') {\n        artifact {\n            classifier = 'jakarta'\n        }\n    }\n}\npublishing { publications { maven(MavenPublication) { artifact(sourcesJar) { classifier 'sources' } } } }\njar {\n    archiveClassifier = 'all'\n    if (GradleVersion.current() < GradleVersion.version('6.0')) {\n        baseName = 'old'\n    }\n}\nconfigurations { runtime }\nfrom configurations.runtime\ntask uploadArchives\nuploadArchives { }\ndependencies { id 'maven' }\napply plugin: 'maven-publish'\n";
         assert_eq!(rules("build.gradle", src), vec![]);
+    }
+
+    #[test]
+    fn removed_api_skips_a_configuration_the_file_makes() {
+        // `configurations { testRuntime }` or reading the name in that block makes it (#145)
+        for decl in [
+            "configurations { testRuntime }\n",
+            "configurations {\n    integrationTestRuntime.extendsFrom testRuntime\n}\n",
+            "configurations {\n    foo.extendsFrom(testRuntime)\n}\n",
+        ] {
+            let src = format!(
+                "{decl}configurations {{\n    it2.extendsFrom configurations.testRuntime\n}}\ndependencies {{\n    testRuntime 'a:b:1'\n}}\n"
+            );
+            assert_eq!(rules("build.gradle", &src), vec![], "{decl}");
+        }
+        // only the name it makes: `configurations.testRuntime` there, or another name, isn't one
+        let src = "configurations {\n    a.extendsFrom configurations.testRuntime\n    b.extendsFrom runtime\n}\nx = configurations.testRuntime\n";
+        assert_eq!(
+            rules("build.gradle", src),
+            vec![("GradleRemovedApi", 2), ("GradleRemovedApi", 5)]
+        );
     }
 
     #[test]
