@@ -63,8 +63,10 @@ repos:
         name: groovyfmt
         entry: groovyfmt
         language: system
-        files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile)$
+        files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile|\.(?i:jenkinsfile))$
 ```
+
+The hooks take `Jenkinsfile`, `*.jenkinsfile` (any case) and `Jenkinsfile.groovy`, but not other `Jenkinsfile.*` names: a directory walk reads those first and skips any that is not Groovy (a template, a patch), and pre-commit names files explicitly, which groovyfmt always takes. Add the ones that are pipelines to the hook's `files` yourself.
 
 pre-commit passes the staged files by name, and `exclude` in `.groovyfmt.toml` still applies to them. So generated code stays untouched without repeating the patterns in the hook.
 

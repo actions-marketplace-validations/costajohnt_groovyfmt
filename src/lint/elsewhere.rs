@@ -221,7 +221,7 @@ fn walk(
             if !crate::is_skipped_dir(&p) && !cfg.excluded(&p) {
                 walk(&p, res, out, bytes, capped);
             }
-        } else if meta.is_file() && crate::is_groovy_file(&p) && !cfg.excluded(&p) {
+        } else if meta.is_file() && crate::is_walked_file(&p) && !cfg.excluded(&p) {
             *bytes += meta.len();
             out.push(p);
             *capped =

@@ -268,7 +268,19 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
         }
         line_start = line_end + 1;
     }
-    if style.normalize_spacing && !crate::spacing::respace(src, tree, &mut out, &bodies) {
+    if style.normalize_spacing
+        && !crate::spacing::respace(
+            src,
+            tree,
+            &mut out,
+            &bodies,
+            if style.use_tabs {
+                style.indent.max(1)
+            } else {
+                8
+            },
+        )
+    {
         return Err("spacing did not settle");
     }
     while out.last().is_some_and(|(l, _)| l.is_empty()) {

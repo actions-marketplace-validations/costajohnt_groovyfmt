@@ -31,6 +31,8 @@ With `normalize_spacing = true` in the config, groovyfmt also fixes the spaces b
 - no space after a prefix operator (`-x`, `!x`, `*args`) or before a postfix one (`i++`), around `::`, or before the `[` of an array type (`String[]`), and one after a cast (`(String) x`)
 - any other run of spaces becomes one
 
+A tab between two tokens counts as the spaces up to the next tab stop of the line as written (every 8 columns, or every `indent` columns with `use_tabs`), as an editor shows it. So `foo(a,\tb)` becomes `foo(a, b)`, and a run of tabs or of tabs and spaces becomes one space unless it is [alignment](#alignment): tabs that line up at a tab stop are kept as that many spaces. Tabs written for a different tab width than that may line up in your editor and not here, and then they become one space, as before. Tabs in indentation, strings and comments are not spacing between tokens, and a tab in a gap left as written (below) stays.
+
 ### Left as written
 
 Some spacing is left as written because changing it could change what the code means or how it reads:

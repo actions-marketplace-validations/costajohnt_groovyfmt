@@ -106,8 +106,11 @@ pub const RULES: &[Rule] = &[
         name: "EmptyForStatement",
         default: true,
         description: "for loop with an empty block",
-        why: "A `for` loop with an empty block does nothing.",
-        bad: "for (f in files) {\n}",
+        why: "A `for` loop with an empty block does nothing. Not flagged: a for-in loop over \
+              anything but a literal, which may be draining an iterator, and a `for (;;)` loop \
+              whose condition calls or assigns, or whose update calls or reads a field \
+              (`n = n.next`), as for `while`.",
+        bad: "for (i in 0..<n) {\n}",
         good: "for (f in files) {\n    check(f)\n}",
         fixable: false,
     },
@@ -802,7 +805,17 @@ pub fn lint_file(path: &Path, src: &str) -> Result<Vec<Violation>, &'static str>
                     &mut v,
                 );
             }
-            "for_statement" | "for_in_statement" if !condition_works(n) => empty_body(
+            // a classic `for` whose condition does work, or whose update walks something
+            // (`for (; it.hasNext(); it.next())`, `n = n.next`), as for `while`; a for-in loop over anything
+            // but a literal may be draining an iterator (`for (d in data) {}`)
+            "for_statement" if !condition_works(n) && !update_works(n) => empty_body(
+                n,
+                "body",
+                "EmptyForStatement",
+                "The for statement is empty",
+                &mut v,
+            ),
+            "for_in_statement" if iterates_literal(n) => empty_body(
                 n,
                 "body",
                 "EmptyForStatement",
@@ -1100,8 +1113,13 @@ fn empty_body(n: Node, field: &str, rule: &'static str, msg: &str, v: &mut Vec<V
 /// Whether a loop's condition does the work, so an empty body is fine:
 /// `while (reader.read() != -1) {}`, `while ((line = next()) != null) {}`, `while (i++ < n) {}`.
 fn condition_works(n: Node) -> bool {
+    works(n.child_by_field_name("condition"))
+}
+
+/// Whether `c` calls, assigns or increments: work a loop may do with an empty body.
+fn works(c: Option<Node>) -> bool {
     let mut works = false;
-    if let Some(c) = n.child_by_field_name("condition") {
+    if let Some(c) = c {
         crate::preorder(c, |x| {
             works |= matches!(
                 x.kind(),
@@ -1114,6 +1132,65 @@ fn condition_works(n: Node) -> bool {
         });
     }
     works
+}
+
+/// Whether a classic `for`'s update walks something, so an empty body is fine: it calls
+/// (`it.next()`), or assigns a value read from somewhere other than locals and literals
+/// (`n = n.next`, `n = n[0]`). Counting on locals (`i++`, `i += 1`, `i = i + 1`) is not work:
+/// `for (int i = 0; i < n; i += 1) {}` is still empty.
+fn update_works(n: Node) -> bool {
+    let mut works = false;
+    if let Some(u) = n.child_by_field_name("update") {
+        crate::preorder(u, |x| {
+            works |= x.kind() == "method_invocation"
+                || (x.kind() == "assignment_expression"
+                    && x.child_by_field_name("right").is_some_and(reads_more));
+            !works
+        });
+    }
+    works
+}
+
+/// Whether `e` reads anything but locals and literals through arithmetic.
+fn reads_more(e: Node) -> bool {
+    let mut more = false;
+    crate::preorder(e, |x| {
+        more |= x.is_named()
+            && !matches!(
+                x.kind(),
+                "identifier"
+                    | "number_literal"
+                    | "boolean_literal"
+                    | "null_literal"
+                    | "binary_expression"
+                    | "unary_expression"
+                    | "parenthesized_expression"
+            );
+        !more
+    });
+    more
+}
+
+/// Whether a for-in loop iterates a literal (`[1, 2]`, `0..<n`, a map or string literal) that
+/// does nothing when iterated. Any other value may be an iterator or a lazy iterable whose
+/// iteration is the work (`for (d in data) {}`), so an empty loop over it isn't flagged. A
+/// call in a list or map literal does work; one in a range's bounds only sizes the range
+/// (`0..<list.size()`).
+fn iterates_literal(n: Node) -> bool {
+    let Some(mut v) = n.child_by_field_name("value") else {
+        return false;
+    };
+    while v.kind() == "parenthesized_expression" {
+        match v.named_child(0) {
+            Some(c) => v = c,
+            None => return false,
+        }
+    }
+    match v.kind() {
+        "range_expression" => true,
+        "list_literal" | "map_literal" | "string_literal" => !works(Some(v)),
+        _ => false,
+    }
 }
 
 /// Condition with any wrapping parentheses removed.
@@ -1418,7 +1495,7 @@ mod tests {
 
     #[test]
     fn empty_blocks() {
-        let src = "if (a) { }\nif (a) { x() } else { }\ntry { } finally { }\nwhile (a) { }\nfor (i in xs) { }\nif (a) {\n  // intentionally nothing\n}\n";
+        let src = "if (a) { }\nif (a) { x() } else { }\ntry { } finally { }\nwhile (a) { }\nfor (i in 0..2) { }\nif (a) {\n  // intentionally nothing\n}\n";
         assert_eq!(
             rules(src),
             vec![
@@ -1431,7 +1508,7 @@ mod tests {
             ]
         );
         // a condition that calls, assigns or increments does the loop's work
-        let src = "while (reader.read() != -1) { }\nwhile ((line = next()) != null) { }\nwhile (i++ < n) { }\nfor (; it.next() != x; ) { }\nwhile (true) { }\nfor (x in xs) { }\nfor (int i = 0; i < n; i++) { }\nwhile (a.b) { }\n";
+        let src = "while (reader.read() != -1) { }\nwhile ((line = next()) != null) { }\nwhile (i++ < n) { }\nfor (; it.next() != x; ) { }\nwhile (true) { }\nfor (x in [1, 2]) { }\nfor (int i = 0; i < n; i++) { }\nwhile (a.b) { }\n";
         assert_eq!(
             rules(src),
             vec![
@@ -1440,6 +1517,42 @@ mod tests {
                 ("EmptyForStatement", 6),
                 ("EmptyForStatement", 7),
                 ("EmptyWhileStatement", 8),
+            ]
+        );
+        // a for-in loop over anything but a literal may drain an iterator; a classic `for`
+        // whose update calls or assigns walks something
+        let src = "for (d in data) { }\nfor (d in rows()) { }\nfor (String s : it) { }\nfor (i in 0..<n) { }\nfor (k in [a: 1]) { }\nfor (c in 'abc') { }\nfor (x in [f(), g()]) { }\nfor (n = head; n.next != null; n = n.next) { }\nfor (; it.hasNext(); it.next()) { }\nfor (;;) { }\n";
+        assert_eq!(
+            rules(src),
+            vec![
+                ("EmptyForStatement", 4),
+                ("EmptyForStatement", 5),
+                ("EmptyForStatement", 6),
+                ("EmptyForStatement", 10),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_for_counting_on_locals_is_flagged() {
+        // an update that only counts is no work; one that reads a field or calls walks
+        let src = "for (int i = 0; i < n; i += 1) { }\nfor (i = 0; i < n; i = i + 1) { }\nfor (int i = n; i > 0; i -= 2) { }\nfor (n = head; n.next != null; n = n.next) {}\nfor (; n; n = n[0]) { }\nfor (; i < n; i = step(i)) { }\n";
+        assert_eq!(
+            rules(src),
+            vec![
+                ("EmptyForStatement", 1),
+                ("EmptyForStatement", 2),
+                ("EmptyForStatement", 3),
+            ]
+        );
+        // a parenthesized literal is a literal; a call in a range's bounds only sizes it
+        let src = "for (i in (0..<n)) {}\nfor (x in ([1,2])) {}\nfor (i in 0..<list.size()) {}\nfor (x in (data)) {}\nfor (x in ([f()])) {}\n";
+        assert_eq!(
+            rules(src),
+            vec![
+                ("EmptyForStatement", 1),
+                ("EmptyForStatement", 2),
+                ("EmptyForStatement", 3),
             ]
         );
     }
@@ -1474,7 +1587,7 @@ mod tests {
 
     #[test]
     fn every_rule_fires_and_every_emitted_rule_is_registered() {
-        let src = "import a.B\nimport a.B\nimport c.Unused\ndef s = \"x\";\ntry { f() } catch (e) { }\nif (true) { }\nif (a = 1) { f() } else { }\ntry { } finally { }\nwhile (a) { }\nfor (i in xs) { }\ndef m = [a: 1, a: 2]\nswitch (x) { case 1: f(); break\n case 1: g() }\nif (x == x) { f() }\nB.go()\n";
+        let src = "import a.B\nimport a.B\nimport c.Unused\ndef s = \"x\";\ntry { f() } catch (e) { }\nif (true) { }\nif (a = 1) { f() } else { }\ntry { } finally { }\nwhile (a) { }\nfor (i in 0..2) { }\ndef m = [a: 1, a: 2]\nswitch (x) { case 1: f(); break\n case 1: g() }\nif (x == x) { f() }\nB.go()\n";
         let mut emitted: HashSet<&str> =
             lint(src).expect("parses").iter().map(|v| v.rule).collect();
         let jenkins = "pipeline {\n agent foo\n agent none\n def x = 1\n bogus { }\n options { parameters([]) }\n stages {\n  stage(\"${x}\") {\n   when { onBranch 'x' }\n   steps { if (x) { } }\n  }\n  stage('a') { }\n  stage('a') { steps { echo 1 } }\n }\n}\n";
