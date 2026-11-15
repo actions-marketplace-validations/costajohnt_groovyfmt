@@ -320,6 +320,9 @@ mod tests {
         // on an import: the whole file
         let src = "@SuppressWarnings('UnusedImport')\nimport a.B\nimport a.C\n";
         assert_eq!(rules(src), vec![]);
+        // #117: a DSL delegate's private members, on the method or the class
+        let src = "class Site {\n  @SuppressWarnings('UnusedPrivateMethod')\n  private void page(String p) { }\n  private void gone() { }\n}\n@SuppressWarnings(['UnusedPrivateMethod', 'UnusedPrivateField'])\nclass Dsl {\n  private int n\n  private void entry() { }\n}\n";
+        assert_eq!(rules(src), vec![("UnusedPrivateMethod", 4)]);
     }
 
     #[test]

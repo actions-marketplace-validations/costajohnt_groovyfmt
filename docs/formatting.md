@@ -7,6 +7,7 @@ By default, formatting changes whitespace only:
 - Every line is re-indented from the parse tree (blocks, closures, argument lists, list and map literals, continued expressions, Spock `when:` / `then:` blocks).
 - Trailing whitespace is removed, runs of blank lines collapse to one, and the file ends with one newline.
 - Lines inside multi-line strings and comments are left exactly as they are.
+- Tabs after the indent stay tabs, except on a line whose indent moves by other than a whole tab stop (8 columns, or `indent` with `use_tabs`): there a tab between two tokens becomes the spaces up to its tab stop of the line as written, so tab-aligned columns (`\t\tname:\t\t\t"x"` above `\t\tmultiple:\t\ttrue`) still line up under the new indent. These are the same tabs, turned into the same spaces, as [`normalize_spacing`](#spacing-within-lines) expands, so running it on default-formatted output gives what running it on the original does. Tabs in strings and comments, and in gaps `normalize_spacing` leaves as written (such as before a trailing comment), stay.
 - A Hubitat `#include namespace.Library` line that starts at column 0 is kept as written. The hub expands it before compiling and Groovy itself rejects it, so groovyfmt reads it as a comment: the rest of the file is formatted and linted, and lint ignores the line.
 
 Two config options do more, and both are off by default. [`normalize_spacing`](#spacing-within-lines) fixes the spaces between tokens within a line. [`max_line_length`](#line-wrapping) also adds line breaks.

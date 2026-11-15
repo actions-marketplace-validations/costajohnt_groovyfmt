@@ -214,6 +214,14 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
     let mut out: Vec<(String, &str)> = Vec::new();
     // per output line, for `spacing`: its text's source offset and indent length
     let mut bodies: Vec<Option<(usize, usize)>> = Vec::new();
+    // tab stops, as `spacing` counts them
+    let tab = if style.use_tabs {
+        style.indent.max(1)
+    } else {
+        8
+    };
+    // the lines with a tab after their indent that moved off their tab stops (see below)
+    let mut shifted: Vec<Option<(usize, usize)>> = Vec::new();
     let mut line_start = 0usize;
     let mut row_indent: Vec<usize> = Vec::new(); // final indent of each row, for children to inherit
     let mut labels = LabelCache::default();
@@ -241,11 +249,13 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
             row_indent.push(style.cols(&content[..lead]));
             out.push((content.to_string(), eol));
             bodies.push(None);
+            shifted.push(None);
         } else if body.trim().is_empty() {
             row_indent.push(0);
             if out.last().is_some_and(|(l, _)| !l.is_empty()) {
                 out.push((String::new(), eol));
                 bodies.push(None);
+                shifted.push(None);
             }
         } else {
             // `//` at column 0 is commented-out code or a doc-snippet marker; IntelliJ leaves
@@ -264,24 +274,21 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
             row_indent.push(indent);
             let pad = style.pad(indent);
             bodies.push(Some((pos, pad.len())));
+            // a tab after the indent of a line whose indent moved by other than a whole tab
+            // stop would no longer line up with the lines around it (#133)
+            let moved = crate::spacing::width_at(&content[..lead], 0, tab) % tab
+                != crate::spacing::width_at(&pad, 0, tab) % tab;
+            shifted.push((moved && text.contains('\t')).then_some((pos, pad.len())));
             out.push((pad + text, eol));
         }
         line_start = line_end + 1;
     }
-    if style.normalize_spacing
-        && !crate::spacing::respace(
-            src,
-            tree,
-            &mut out,
-            &bodies,
-            if style.use_tabs {
-                style.indent.max(1)
-            } else {
-                8
-            },
-        )
-    {
-        return Err("spacing did not settle");
+    if style.normalize_spacing {
+        if !crate::spacing::respace(src, tree, &mut out, &bodies, tab) {
+            return Err("spacing did not settle");
+        }
+    } else if shifted.iter().any(Option::is_some) {
+        crate::spacing::expand_tabs(src, tree, &mut out, &shifted, tab);
     }
     while out.last().is_some_and(|(l, _)| l.is_empty()) {
         out.pop();
@@ -807,6 +814,51 @@ mod tests {
             fmt(want),
             "class A {\n    def f() {\n        render(view: 'x',\n            model: 1)\n        def s = '''\n\t keep\n'''\n    }\n}\n"
         );
+    }
+
+    #[test]
+    fn interior_tabs_keep_their_columns_when_reindented() {
+        // #133: tab-aligned values under a two-tab indent, re-indented to four spaces
+        let src = "def m = [\n\t\tname:\t\t\t\t\"x\",\n\t\tmultiple:\t\t\ttrue, // c\n\t\tz:\t1\t// d\n]\n";
+        let pad = |n| " ".repeat(n);
+        let want = format!(
+            "def m = [\n    name:{}\"x\",\n    multiple:{}true, // c\n    z:{}1\t// d\n]\n",
+            pad(27),
+            pad(23),
+            pad(6)
+        );
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(&want), want, "idempotent");
+        // normalize_spacing gives one column whether it runs on the source or on the above
+        let spacing = Style {
+            normalize_spacing: true,
+            ..Style::default()
+        };
+        let both = |s: &str| match format(s, &spacing) {
+            Outcome::Formatted(o) => o,
+            other => panic!("{other:?}"),
+        };
+        let direct = both(src);
+        assert_eq!(both(&want), direct);
+        assert!(
+            direct.contains(&format!("name:{}\"x\"", pad(27))),
+            "{direct}"
+        );
+        // tabs stay where the indent moved by whole tab stops, and with use_tabs
+        let whole = "if (x) {\n\tif (y) {\n\t\ta =\t1\n\t}\n}\n";
+        assert_eq!(
+            fmt(whole),
+            "if (x) {\n    if (y) {\n        a =\t1\n    }\n}\n"
+        );
+        let tabs = Style {
+            use_tabs: true,
+            ..Style::default()
+        };
+        let tabbed = "def m = [\n\tname:\t\"x\"\n]\n";
+        assert_eq!(format(tabbed, &tabs), Outcome::Unchanged);
+        // tabs in strings and comments are never touched
+        let s = "def f() {\n\t\tdef s = 'a\tb' /* c\td */\n}\n";
+        assert_eq!(fmt(s), "def f() {\n    def s = 'a\tb' /* c\td */\n}\n");
     }
 
     #[test]
