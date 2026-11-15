@@ -244,8 +244,8 @@ fn strict_fails_on_skipped_files_and_lists_them() {
 #[test]
 fn hubitat_include_lines_are_kept_as_written() {
     let d = Dir::new("hubitat");
-    let src = "#include ShellyUSA.ShellyUSA_Driver_Library\nimport groovy.transform.Field\n#include kurtsanders.AWSLibrary\nmetadata {\ndefinition(name: 'X', namespace: 'y') {\ncapability 'Switch'\n}\n}\n\ndef on() {\nsendEvent(name: 'switch', value: 'on')\n}\n#include esphome.espHomeApiHelper\n";
-    let pretty = "#include ShellyUSA.ShellyUSA_Driver_Library\nimport groovy.transform.Field\n#include kurtsanders.AWSLibrary\nmetadata {\n    definition(name: 'X', namespace: 'y') {\n        capability 'Switch'\n    }\n}\n\ndef on() {\n    sendEvent(name: 'switch', value: 'on')\n}\n#include esphome.espHomeApiHelper\n";
+    let src = "#include ShellyUSA.ShellyUSA_Driver_Library\nimport groovy.transform.Field\n#include kurtsanders.AWSLibrary\n@Field int n = 1\nmetadata {\ndefinition(name: 'X', namespace: 'y') {\ncapability 'Switch'\n}\n}\n\ndef on() {\nsendEvent(name: 'switch', value: 'on')\n}\n#include esphome.espHomeApiHelper\n";
+    let pretty = "#include ShellyUSA.ShellyUSA_Driver_Library\nimport groovy.transform.Field\n#include kurtsanders.AWSLibrary\n@Field int n = 1\nmetadata {\n    definition(name: 'X', namespace: 'y') {\n        capability 'Switch'\n    }\n}\n\ndef on() {\n    sendEvent(name: 'switch', value: 'on')\n}\n#include esphome.espHomeApiHelper\n";
     d.write("Driver.groovy", src);
     assert_eq!(
         run(&d.0, &["--check", "--strict"], None).status.code(),
