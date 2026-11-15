@@ -299,9 +299,10 @@ mod tests {
             fixed("import a.B;\ndef x = {\n"),
             Fix::Refused("parse error")
         );
-        // the grammar doesn't parse an empty `for (;;)` or `if` body, so those aren't either
+        // a classic `for`'s empty `;` body parses and is the body, so it stays
+        assert_eq!(fixed("for (;;);\nf()\n"), Fix::Nothing);
+        // the grammar doesn't parse an empty for-in or `if` body, so those aren't either
         for src in [
-            "for (;;);\nf()\n",
             "if (c);\nf()\n",
             "for (x in xs);\nf()\n",
         ] {
