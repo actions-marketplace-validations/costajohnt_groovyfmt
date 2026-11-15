@@ -6,6 +6,10 @@
 
 - The GitHub Action checks a download from an immutable release (v0.14.0 and later) against GitHub's release attestation with `gh release verify-asset`, so a replaced archive and `.sha256` no longer pass. It still compares the `.sha256` for every release, the older mutable ones included. The check needs gh 2.81.0 or later on the runner; with an older gh an immutable release fails to install rather than install unverified.
 
+### Fixed
+
+- The grammar pin moves to tree-sitter-groovy fa12ca5. Newly accepted: spaces inside a parameter type's type arguments (`def f(Map < String, String > m) {}`, also in constructors and nested, [#79](https://github.com/costajohnt/groovyfmt/issues/79)); `yield` as a name outside a yield statement (`{ a, yield -> yield.call(a) }`, `{ yield -> yield(1) }`, [#80](https://github.com/costajohnt/groovyfmt/issues/80)); `var` as a command call's name with named arguments (`var message : "Hi there"`, [#81](https://github.com/costajohnt/groovyfmt/issues/81)); and an unspaced ternary whose first branch is a list or map (`n.a()?[x: 1]:[x: 2]`), read as Groovy 2.4 and 3 read it, which Groovy 4 rejects ([#82](https://github.com/costajohnt/groovyfmt/issues/82)). `a?[i]` stays a safe index everywhere else, including before the `:` of an enclosing ternary, `case` or `assert`. On the 23,766-file corpus nothing changes (85 skipped, same output).
+
 ## 0.14.1 (2026-11-13)
 
 ### Fixed
