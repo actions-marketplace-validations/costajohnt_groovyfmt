@@ -466,15 +466,15 @@ fn indent_for(
     };
     // A `{` opened on the line where a multi-line string ends (`foo(x: '''` ... `''') {`):
     // that line's indent is the string's text, so indent from the statement around it (#144).
-    if verbatim.get(anchor_row) == Some(&true) && a.child(0).is_some_and(|c| text(c, src) == "{") {
-        if let Some(r) = path[..i - 1]
+    if verbatim.get(anchor_row) == Some(&true)
+        && a.child(0).is_some_and(|c| text(c, src) == "{")
+        && let Some(r) = path[..i - 1]
             .iter()
             .rev()
             .map(|(n, _)| n.start_position().row)
             .find(|&r| r < anchor_row && verbatim.get(r) == Some(&false))
-        {
-            anchor_row = r;
-        }
+    {
+        anchor_row = r;
     }
     let base = row_indent.get(anchor_row).copied().unwrap_or(0);
 
