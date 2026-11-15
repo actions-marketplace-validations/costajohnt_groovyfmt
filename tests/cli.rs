@@ -1885,6 +1885,61 @@ fn discovers_groovy_files_and_skips_build_dirs() {
     assert_eq!(stdout(&o), "Jenkinsfile\nscripts/x.gvy\n");
 }
 
+#[test]
+fn a_build_package_under_src_is_source_and_gradle_output_is_not() {
+    let d = Dir::new("buildpkg");
+    d.write("build.gradle", "");
+    // Gradle output, beside build.gradle: skipped as before
+    d.write("build/gen/G.groovy", UGLY);
+    // a package named build: source
+    d.write("src/main/groovy/org/acme/build/X.groovy", UGLY);
+    d.write("buildSrc/src/main/groovy/p/build/Y.groovy", UGLY);
+    // a subproject's output, with no build file beside it: Gradle's `tmp` gives it away
+    d.write("sub/src/main/groovy/A.groovy", PRETTY);
+    d.write("sub/build/tmp/x/Z.groovy", UGLY);
+    // output of a project kept under some `src` directory, beside its build file
+    d.write("src/proj/pom.xml", "");
+    d.write("src/proj/build/W.groovy", UGLY);
+    // a `build` directory that isn't under `src`: skipped as before
+    d.write("ci/build/V.groovy", UGLY);
+    let o = run(&d.0, &["--check"], None);
+    assert_eq!(
+        stdout(&o),
+        "buildSrc/src/main/groovy/p/build/Y.groovy\nsrc/main/groovy/org/acme/build/X.groovy\n"
+    );
+    // a walk started inside `src` sees it too
+    let o = run(&d.0.join("src/main/groovy"), &["--check", "."], None);
+    assert_eq!(stdout(&o), "org/acme/build/X.groovy\n");
+}
+
+#[test]
+fn discovers_pipelines_named_like_the_editors_do() {
+    let d = Dir::new("pipelines");
+    for f in [
+        "Jenkinsfile",
+        "ci/quarkus.Jenkinsfile",
+        "ci/x.jenkinsfile",
+        "ci/Jenkinsfile.release",
+        "ci/Jenkinsfile.release.groovy",
+    ] {
+        d.write(f, UGLY);
+    }
+    // a suffix that says it's something else
+    for f in [
+        "ci/Jenkinsfile.md",
+        "ci/Jenkinsfile.bak",
+        "ci/Jenkinsfile.yml",
+        "ci/Jenkinsfiles",
+    ] {
+        d.write(f, "not groovy:\n\tat all\n");
+    }
+    let o = run(&d.0, &["--check"], None);
+    assert_eq!(
+        stdout(&o),
+        "Jenkinsfile\nci/Jenkinsfile.release\nci/Jenkinsfile.release.groovy\nci/quarkus.Jenkinsfile\nci/x.jenkinsfile\n"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinks_and_special_files_are_not_followed() {

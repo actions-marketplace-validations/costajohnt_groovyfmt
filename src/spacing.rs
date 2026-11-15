@@ -2,7 +2,9 @@
 //! Runs after re-indenting, on its output lines, and only ever changes a run of spaces
 //! between two tokens on the same line (never a newline, never inside a string or comment).
 //!
-//! A run of two or more spaces (or a tab) may be alignment, so it changes only when the token
+//! A tab between two tokens counts as a space (so `a,\tb` gets its one space and a run of
+//! tabs collapses like a run of spaces), except where the gap is left as written anyway.
+//! A run of two or more spaces may be alignment, so it changes only when the token
 //! after it lines up with nothing on a nearby line (see `neighbors` and `token_at`). Gaps next
 //! to a comment and everything from a Spock `where:` label to the end of its block are left
 //! alone. When a change earlier on a line moves the tokens after it, the next run that is kept
@@ -530,6 +532,7 @@ type Near<'a> = (&'a [char], &'a [bool]);
 
 /// What `lay` needs to know about each gap besides its rule.
 struct GapInfo {
+    /// a tab in a gap whose rule leaves it as written (`Keep`): written back verbatim
     tab: bool,
     /// the first character after the gap
     ch: char,
@@ -619,7 +622,7 @@ fn lay(
     out
 }
 
-/// The text of `row` with its gaps `widths` wide (a gap holding a tab is kept as written).
+/// The text of `row` with its gaps `widths` wide (a kept gap holding a tab is written as is).
 fn text_of(row: &Row, gs: &[Gap], info: &[GapInfo], src: &str, widths: &[usize]) -> String {
     let mut s = row.pad.clone();
     for (k, seg) in row.segs.iter().enumerate() {
@@ -686,7 +689,7 @@ fn respace_capped(
         .map(|x| {
             let after = &src[x.end..];
             GapInfo {
-                tab: src[x.start..x.end].contains('\t'),
+                tab: x.want == Want::Keep && src[x.start..x.end].contains('\t'),
                 ch: after.chars().next().unwrap_or(' '),
                 comment: after.starts_with("//") || after.starts_with("/*"),
             }
@@ -737,6 +740,18 @@ fn respace_capped(
                 .collect()
         })
         .collect();
+    // any other tab between tokens becomes a space, column for column, before the sweeps, so
+    // they see a run of spaces as wide as it was (a lone tab is already one space wide)
+    for (k, r) in rows.iter().enumerate() {
+        let (gs, inf) = (&gaps[r.gaps.clone()], &info[r.gaps.clone()]);
+        if gs
+            .iter()
+            .zip(inf)
+            .any(|(x, i)| !i.tab && src[x.start..x.end].contains('\t'))
+        {
+            lines[r.line].0 = text_of(r, gs, inf, src, &source[k]);
+        }
+    }
     // indents don't change, so neither do the lines each line is compared with
     let near: Vec<Vec<usize>> = rows
         .iter()
@@ -1192,8 +1207,41 @@ mod tests {
     }
 
     #[test]
-    fn tabs_inside_a_line_are_kept() {
-        assert_eq!(fmt("def x\t= 1\n"), "def x\t= 1\n");
+    fn tabs_between_tokens_count_as_spaces() {
+        check(&[
+            ("def x\t= 1", "def x = 1"),
+            ("foo(a,\tb)", "foo(a, b)"),
+            ("if (x)\t{ }", "if (x) { }"),
+            ("def a =\t1", "def a = 1"),
+            ("def a =\t\t1", "def a = 1"),
+            ("def a = \t1", "def a = 1"),
+            ("foo(a\t,b)", "foo(a, b)"),
+            ("x\t=\t[1,\t2]", "x = [1, 2]"),
+        ]);
+    }
+
+    #[test]
+    fn tabs_that_are_not_spacing_between_tokens_are_kept() {
+        check(&[
+            // indentation is the indenter's, not this pass's
+            ("if (x) {\n\tfoo(a,\tb)\n}", "if (x) {\n    foo(a, b)\n}"),
+            // strings, GStrings, slashy and multiline strings, comments
+            ("def s = 'a\t\tb'", "def s = 'a\t\tb'"),
+            ("def s = \"a\t${b}\tc\"", "def s = \"a\t${b}\tc\""),
+            ("def r = /a\t\tb/", "def r = /a\t\tb/"),
+            ("def t = '''a\t,\tb\n\tc'''", "def t = '''a\t,\tb\n\tc'''"),
+            ("// a\t,\tb", "// a\t,\tb"),
+            ("/* a\t,\tb */ f(x)", "/* a\t,\tb */ f(x)"),
+            // gaps left as written: before a comment, member access
+            ("f(a)\t// c", "f(a)\t// c"),
+            ("a\t.b()", "a\t.b()"),
+        ]);
+    }
+
+    #[test]
+    fn spock_tables_with_tabs_are_untouched() {
+        let src = "def 'f'() {\n    expect:\n    f(a)\n    where:\n    a\t|\tb\n    1\t|\t2\n}\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]

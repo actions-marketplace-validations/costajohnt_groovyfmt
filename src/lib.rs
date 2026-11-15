@@ -115,21 +115,93 @@ pub fn printable(s: &str) -> String {
         .replace("##[", "##\\[")
 }
 
-/// Groovy sources, Gradle build scripts, and Jenkinsfiles.
+/// Groovy sources, Gradle build scripts, and Jenkinsfiles: the files a directory walk takes.
+/// The same names the editor plugins treat as Groovy, except `Jenkinsfile.*` with a suffix
+/// that says it is something else (`Jenkinsfile.md`, `Jenkinsfile.bak`).
 pub fn is_groovy_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     [".groovy", ".gradle", ".gvy", ".gy", ".gsh"]
         .iter()
         .any(|ext| name.ends_with(ext))
-        || name == "Jenkinsfile"
+        || (is_jenkinsfile(name)
+            && !name.strip_prefix("Jenkinsfile.").is_some_and(|ext| {
+                NOT_GROOVY.contains(
+                    &ext.rsplit('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                )
+            }))
+}
+
+/// Suffixes of `Jenkinsfile.*` names that a directory walk leaves alone: docs, data and
+/// backup copies, which would not survive being formatted as Groovy.
+const NOT_GROOVY: &[&str] = &[
+    "md",
+    "txt",
+    "adoc",
+    "rst",
+    "html",
+    "orig",
+    "rej",
+    "bak",
+    "swp",
+    "tmp",
+    "yml",
+    "yaml",
+    "json",
+    "xml",
+    "properties",
+    "sh",
+    "bat",
+    "ps1",
+    "py",
+];
+
+/// A pipeline by its name: `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile` (any case:
+/// `ci/release.Jenkinsfile`).
+pub fn is_jenkinsfile(name: &str) -> bool {
+    name == "Jenkinsfile"
+        || name.starts_with("Jenkinsfile.")
+        || name
+            .len()
+            .checked_sub(".jenkinsfile".len())
+            .and_then(|i| name.get(i..))
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(".jenkinsfile"))
 }
 
 /// Directories skipped while walking: hidden ones and common build/vendor output.
 /// A directory named explicitly on the command line is always entered.
+///
+/// `build` is Gradle's output directory, but also a fine package name
+/// (`src/main/groovy/org/acme/build`). One inside a `src` directory is entered unless it
+/// looks like build output: beside a Gradle or Maven build file, or holding Gradle's `tmp`
+/// (which also covers a checkout kept under `~/src`).
 pub fn is_skipped_dir(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    name.starts_with('.') || matches!(name, "build" | "out" | "target" | "node_modules")
+    if name == "build" {
+        // absolute, so a walk started inside `src` (`cd src/main/groovy; groovyfmt .`) counts
+        let full = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let in_src = full
+            .parent()
+            .is_some_and(|p| p.components().any(|c| c.as_os_str() == "src"));
+        let beside_build_file = path
+            .parent()
+            .is_some_and(|p| BUILD_FILES.iter().any(|f| p.join(f).is_file()));
+        return !in_src || beside_build_file || path.join("tmp").is_dir();
+    }
+    name.starts_with('.') || matches!(name, "out" | "target" | "node_modules")
 }
+
+/// Files whose directory holds a project's build output in `build/`.
+const BUILD_FILES: &[&str] = &[
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "pom.xml",
+];
 
 /// For the tests that guard against quadratic (or worse) blow-ups: how cost grows with input
 /// size, measured so that a loaded machine doesn't fail them. A fixed limit in seconds did:

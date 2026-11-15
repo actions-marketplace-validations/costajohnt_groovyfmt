@@ -52,10 +52,11 @@ groovyfmt [OPTIONS] [PATH]...
 
 With no paths, groovyfmt works on the current directory.
 
-Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh` and `Jenkinsfile`. The search skips:
+Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, and pipelines named `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile` (in any case, so `ci/release.Jenkinsfile` too), the names the [editor plugins](editors.md) treat as Groovy. A `Jenkinsfile.*` whose suffix says it is something else (`Jenkinsfile.md`, `.txt`, `.bak`, `.orig`, `.yml`, `.json`, `.xml`, `.sh` and a few more) is left out. The search skips:
 
 - hidden directories
-- `build`, `out`, `target` and `node_modules`
+- `out`, `target` and `node_modules`
+- `build`, Gradle's output directory, except inside a `src` directory: there `build` is a package (`src/main/groovy/org/acme/build`) and is searched, unless it sits beside a `build.gradle`, `build.gradle.kts`, `settings.gradle`, `settings.gradle.kts` or `pom.xml`, or holds a `tmp` directory as Gradle's output does
 - anything matching the config's [`exclude`](configuration.md#exclude) patterns
 
 A file named on the command line is processed even inside a skipped directory, unless it or a directory above it matches `exclude`.
@@ -63,7 +64,7 @@ A file named on the command line is processed even inside a skipped directory, u
 A file named on the command line must still be Groovy by its name. That means one of:
 
 - a name a directory search would find
-- a pipeline named `Jenkinsfile.*` or `*.jenkinsfile`
+- any pipeline named `Jenkinsfile.*` or `*.jenkinsfile`, whatever its suffix
 - a script whose first line is a `#!` that runs groovy
 
 Any other named file (a Makefile or YAML file passed by `groovyfmt *`) is skipped and listed under `-v` or `--strict` as `not a Groovy file`. `--force` reads every named file as Groovy whatever its name.
