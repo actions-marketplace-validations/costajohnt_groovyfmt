@@ -270,7 +270,9 @@ fn want(a: &Tok, b: &Tok, anc: &[Anc], src: &str) -> (Want, &'static str) {
         };
     }
     if ak == "," {
-        return if matches!(bk, ")" | "]" | "}") {
+        // after Groovy 2.4's empty element (`f(a,,b)`), kept as written
+        let empty = a.node.prev_sibling().is_some_and(|p| p.kind() == ",");
+        return if empty || matches!(bk, ")" | "]" | "}") {
             (Keep, "")
         } else {
             (One, "comma")

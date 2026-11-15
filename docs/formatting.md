@@ -8,7 +8,7 @@ By default, formatting changes whitespace only:
 - Trailing whitespace is removed, runs of blank lines collapse to one, and the file ends with one newline.
 - Lines inside multi-line strings and comments are left exactly as they are.
 - A Hubitat `#include namespace.Library` line that starts at column 0 is kept as written. The hub expands it before compiling and Groovy itself rejects it, so groovyfmt reads it as a comment: the rest of the file is formatted and linted, and lint ignores the line.
-- Groovy 2.4's empty argument, list element or map entry (`foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`) is kept as written: the spaces between its commas never change and no line breaks there. Groovy 3 and later reject it; the lint rule [Groovy24EmptyElement](lint.md#general) reports it.
+- Groovy 2.4's empty argument, list element or map entry (`foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`) is kept as written: the spaces between its commas and after the last one never change, and no line breaks there. Groovy 3 and later reject it; the lint rule [Groovy24EmptyElement](lint.md#general) reports it.
 
 Two config options do more, and both are off by default. [`normalize_spacing`](#spacing-within-lines) fixes the spaces between tokens within a line. [`max_line_length`](#line-wrapping) also adds line breaks.
 
@@ -46,6 +46,7 @@ Some spacing is left as written because changing it could change what the code m
 - a binary operator with a space before it and none after (`a -b`, `println -1`)
 - `<` and `>` comparisons chained like a generic type (`x as Kind<Path>[]`)
 - a closure parameter's default (`{ int b=2 -> }`)
+- Groovy 2.4's empty element (`foo(a,,b)`, `[a, , b]`): between its commas and after the last one
 - closures that look like template placeholders (`{{name}}`, `${x}` outside a string, a closure standing alone as a statement)
 
 ### Alignment
