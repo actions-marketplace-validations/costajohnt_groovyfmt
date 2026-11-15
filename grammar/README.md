@@ -2,7 +2,7 @@
 
 The Groovy grammar groovyfmt parses with, copied by `scripts/update-grammar.sh` from
 [costajohnt/tree-sitter-groovy](https://github.com/costajohnt/tree-sitter-groovy) at commit
-`0c4a05ff27f412968ac6ce820c191e193306eb1f` (2026-11-15, branch `groovyfmt-base`). That fork is
+`58db4930a828dbdd90ca2af98c7c8b62057eb68c` (2026-11-15, branch `groovyfmt-base`). That fork is
 [dekobon/tree-sitter-groovy](https://github.com/dekobon/tree-sitter-groovy) (Elijah Zupancic)
 plus fixes made for groovyfmt; most of them are open as pull requests there. `REV` holds the
 same commit for scripts.

@@ -3294,6 +3294,40 @@ fn private_members_need_a_file_that_names_their_class() {
 }
 
 #[test]
+fn a_method_after_a_comment_and_an_annotation_is_a_method() {
+    // #122: a member, a comment, then an annotated method with a modifier and a return
+    // type was read as a field named after the return type
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "class A {\n    def x = 1\n    // doc\n    @Deprecated\n    private boolean isLeaf() {\n        true\n    }\n}\n",
+            &["A.groovy:5: isLeaf"],
+        ),
+        (
+            "class A {\n    def x = 1\n    /** doc */\n    @Deprecated\n    private String isLeaf() { 'a' }\n}\n",
+            &["A.groovy:5: isLeaf"],
+        ),
+        (
+            "class A {\n    def x = 1\n    /** javadoc */ @SuppressWarnings('Instanceof') private static boolean isLeaf(Object n) { n }\n}\n",
+            &["A.groovy:3: isLeaf"],
+        ),
+        // called, so nothing is reported
+        (
+            "class A {\n    def x = 1\n    // doc\n    @Deprecated\n    private boolean isLeaf() {\n        true\n    }\n    def f() { isLeaf() }\n}\n",
+            &[],
+        ),
+    ];
+    for (i, (src, want)) in cases.iter().enumerate() {
+        let d = project(&format!("issue122-{i}"), &[("A.groovy", src)]);
+        let o = run(&d.0, &["--lint"], None);
+        assert_eq!(unused_private(&o), *want, "{src}");
+        assert!(!stdout(&o).contains("UnusedPrivateField"), "{}", stdout(&o));
+        if !want.is_empty() {
+            assert!(stdout(&o).contains("UnusedPrivateMethod"), "{}", stdout(&o));
+        }
+    }
+}
+
+#[test]
 fn excluded_files_and_files_past_the_caps_decide_nothing() {
     let owner = "class A {\n    private void run() { }\n}\n";
     let user = "class B {\n    def f(A a) { a.run() }\n}\n";

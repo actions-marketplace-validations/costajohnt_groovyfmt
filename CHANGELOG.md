@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The grammar pin moves to tree-sitter-groovy 58db493. A method with annotations, modifiers and a return type after another member and a comment (`def x = 1`, `// doc`, `@Deprecated private boolean isLeaf() { }`) parses as a method, in a class and in a script. It was read as a field named after its return type and a constructor, so UnusedPrivateField reported `boolean` and UnusedPrivateMethod never saw the method. `@Field static final int N = 1` after a comment in a script is one typed declaration, not `int` and then `N = 1`. ([#122](https://github.com/costajohnt/groovyfmt/issues/122)) On the 23,794-file corpus nothing changes (85 skipped, same output).
+
 ## 0.16.1 (2026-11-15)
 
 ### Fixed
