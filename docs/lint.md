@@ -23,7 +23,7 @@ Turn a rule on or off in the `[lint]` table of [`.groovyfmt.toml`](configuration
 | EmptyTryBlock | on | a `try` with an empty block |
 | EmptyFinallyBlock | on | a `finally` with an empty block |
 | EmptyWhileStatement | on | a `while` loop with an empty block; not one whose condition does the work with a call, an assignment or an increment, `while (in.read() != -1) {}` |
-| EmptyForStatement | on | a `for` loop with an empty block; not a `for (;;)` loop whose condition calls, assigns or increments, or whose update calls or assigns (`n = n.next`), as for `while`, and not a for-in loop over anything but a literal (`for (d in data) {}` may be draining an iterator) |
+| EmptyForStatement | on | a `for` loop with an empty block; not a `for (;;)` loop whose condition calls, assigns or increments, or whose update calls or reads a field (`n = n.next`; counting, `i += 1`, isn't work), as for `while`, and not a for-in loop over anything but a literal (`for (d in data) {}` may be draining an iterator) |
 | DuplicateMapKey | on | a map literal with the same constant key twice (`a:` and `'a':` count as the same); the later entry wins |
 | DuplicateCaseStatement | on | two `case` labels for the same constant (`'a'` and `"a"` count as the same) |
 | AssignmentInConditional | on | `if (x = 1)`, where `==` was probably meant; `while (x = next())` is a common idiom and is exempt, and so is an assignment in extra parentheses, `if ((m = re.matcher(s)))` |
