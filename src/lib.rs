@@ -225,27 +225,46 @@ fn jenkinsfile_suffix(name: &str) -> Option<&str> {
 /// A directory named explicitly on the command line is always entered.
 ///
 /// `build` is Gradle's output directory, but also a fine package name
-/// (`src/main/groovy/org/acme/build`). It is a package, and entered, only when a directory
-/// named `src` lies between it and its project: the nearest directory above it holding a
-/// Gradle or Maven build file (`BUILD_FILES`) or a `.git`. So `lib/src/main/groovy/build`
-/// is entered and `sub/build` is skipped even in a subproject with no build file of its own,
-/// and a checkout kept under `~/src` doesn't count. Outside any project (no build file or
-/// `.git` above it), a `src` anywhere in its absolute path makes it a package. The path is
-/// absolute so a walk started inside `src` (`cd src/main/groovy; groovyfmt .`) counts.
+/// (`src/main/groovy/org/acme/build`) or a plain directory (`jobs/build/x/Jenkinsfile`). Its
+/// project is the nearest directory above it holding a Gradle or Maven build file
+/// (`BUILD_FILES`) or a `.git`. It is output, and skipped, only when that project has a build
+/// file and no directory named `src` lies between them. So `sub/build` is skipped even in a
+/// subproject with no build file of its own, `lib/src/main/groovy/build` is entered, a
+/// checkout kept under `~/src` doesn't count, and in a repository with a `.git` but no build
+/// file (a Jenkins job repository) `build` is an ordinary directory. Outside any project (no
+/// build file or `.git` above it), a `src` anywhere in its absolute path makes it a package.
+/// The path is absolute so a walk started inside `src` (`cd src/main/groovy; groovyfmt .`)
+/// counts.
 pub fn is_skipped_dir(path: &Path) -> bool {
+    skipped_dir(path).is_some()
+}
+
+/// Why `is_skipped_dir` skips `path`, for `-v`.
+pub fn skipped_dir(path: &Path) -> Option<&'static str> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if name == "build" {
         let full = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let mut in_src = false;
+        let mut output = true;
         for a in full.ancestors().skip(1) {
-            if a.join(".git").exists() || BUILD_FILES.iter().any(|f| a.join(f).is_file()) {
+            let build_file = BUILD_FILES.iter().any(|f| a.join(f).is_file());
+            if build_file || a.join(".git").exists() {
+                output = build_file;
                 break;
             }
             in_src |= a.file_name().is_some_and(|n| n == "src");
         }
-        return !in_src;
+        return (output && !in_src).then_some("build output");
     }
-    name.starts_with('.') || matches!(name, "out" | "target" | "node_modules")
+    if name.starts_with('.') {
+        Some("hidden")
+    } else if matches!(name, "out" | "target") {
+        Some("build output")
+    } else if name == "node_modules" {
+        Some("dependencies")
+    } else {
+        None
+    }
 }
 
 /// Files that mark a project's root directory, whose `build/` is its output.
