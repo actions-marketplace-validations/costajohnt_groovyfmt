@@ -468,6 +468,15 @@ pub const RULES: &[Rule] = &[
         good: "// MathSpec.groovy\nclass MathSpec {\n}",
         fixable: false,
     },
+    Rule {
+        name: "Groovy24EmptyElement",
+        default: true,
+        description: "an empty argument, list element or map entry (`foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`), which Groovy 2.4 drops and Groovy 3 and later reject",
+        why: "Groovy 2.4 (Hubitat, SmartThings) ignores the extra comma, so it does nothing there, and Groovy 3 and later refuse to compile the file. Removing it changes nothing on 2.4 and makes the code portable.",
+        bad: "def modes = [\"off\", \"cool\", , \"heat\"]\nsetModes(modes,, true)",
+        good: "def modes = [\"off\", \"cool\", \"heat\"]\nsetModes(modes, true)",
+        fixable: false,
+    },
     // Unused code (src/lint/unused.rs)
     Rule {
         name: "UnusedPrivateField",
@@ -1613,7 +1622,7 @@ mod tests {
         let gradle =
             "repositories { jcenter() }\ndependencies { compile 'a:b:+' }\ntask t << { }\n";
         let spock = "class S extends Specification {\n def f() {\n  when:\n  f()\n  then: 'x'\n  where:\n  a | b\n  2 | 3 | 4\n }\n def g() {\n  then:\n  x\n }\n}\n";
-        let more = "package p\nimport p.Q\nimport java.util.Date\nclass K {\n private int pf\n private void m() { }\n static { }\n { }\n boolean equals(Object o) { true }\n int hashcode() { 1 }\n String toString() { null }\n}\nclass L {\n boolean equals(String s) { true }\n}\ndef g() {\n def u = 1\n return 1\n f()\n}\ntry { f() } finally { return 1; throw new E(); assert x }\nswitch (x) { }\ndef s = [1, 1] as Set\ndef t = true ? 1 : 2\nassert true\nif (1 == 2) { f() }\nif (x != null || x.a) { f() }\nif (x % 2 == 1) { f() }\nl.removeAll(l)\nthrow RuntimeException()\nvoid h() { try { f() } catch (e) { new BadException(e) } }\nDate d = new Q()\ndef bd = new BigDecimal(1.5)\nif (a | b) { f() }\ndef nn = !!x\nsynchronized (l) { }\nfor (; c;) { f() }\nInteger.getInteger('p')\ndef r = (int) Math.random()\ndef io = !x instanceof String\ndef m1 = y % 1\n";
+        let more = "package p\nimport p.Q\nimport java.util.Date\nclass K {\n private int pf\n private void m() { }\n static { }\n { }\n boolean equals(Object o) { true }\n int hashcode() { 1 }\n String toString() { null }\n}\nclass L {\n boolean equals(String s) { true }\n}\ndef g() {\n def u = 1\n return 1\n f()\n}\ntry { f() } finally { return 1; throw new E(); assert x }\nswitch (x) { }\ndef s = [1, 1] as Set\ndef t = true ? 1 : 2\nassert true\nif (1 == 2) { f() }\nif (x != null || x.a) { f() }\nif (x % 2 == 1) { f() }\nl.removeAll(l)\nthrow RuntimeException()\nvoid h() { try { f() } catch (e) { new BadException(e) } }\nDate d = new Q()\ndef bd = new BigDecimal(1.5)\nif (a | b) { f() }\ndef nn = !!x\nsynchronized (l) { }\nfor (; c;) { f() }\nInteger.getInteger('p')\ndef r = (int) Math.random()\ndef io = !x instanceof String\ndef m1 = y % 1\nf(a,,b)\n";
         for (name, src) in [
             ("A.groovy", more),
             ("B.groovy", "// groovyfmt-ignore DeadCode\nprintln 1\n"),

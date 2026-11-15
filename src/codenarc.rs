@@ -1020,7 +1020,7 @@ impl Import {
             }
         }
         if self.defines_set {
-            o += "# groovyfmt's Jenkins, Gradle and Spock rules and UnusedSuppression keep their defaults.\n";
+            o += "# groovyfmt's Jenkins, Gradle and Spock rules, UnusedSuppression and Groovy24EmptyElement keep their defaults.\n";
         }
 
         let mut list = |title: &str, items: Vec<String>| {
@@ -1563,7 +1563,7 @@ mod tests {
             let ours = ["Jenkins", "Gradle", "Spock"]
                 .iter()
                 .any(|p| r.name.starts_with(p))
-                || r.name == "UnusedSuppression";
+                || matches!(r.name, "UnusedSuppression" | "Groovy24EmptyElement");
             assert_eq!(known(r.name), !ours, "{}", r.name);
         }
     }

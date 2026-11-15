@@ -1,6 +1,6 @@
 # Lint
 
-`groovyfmt --lint` has 77 rules, 55 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
+`groovyfmt --lint` has 78 rules, 56 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
 
 The general rules are named after their [CodeNarc](https://codenarc.org/) equivalents, so existing configurations map across. The Jenkins, Gradle and Spock rules catch, in milliseconds, mistakes those tools otherwise report only when a build runs.
 
@@ -34,6 +34,7 @@ Turn a rule on or off in the `[lint]` table of [`.groovyfmt.toml`](configuration
 | DoubleNegative | off | `!!x` or `!(!x)` (`!!x` is a common way to turn a value into a boolean) |
 | ForLoopShouldBeWhileLoop | off | `for (; condition;)`, a `for` loop with only a condition (a style preference) |
 | ClassNameSameAsFilename | off | a file whose only top-level code is one class, interface, enum, trait or annotation type, named other than the file less its `.groovy` (a naming convention); a file with any other top-level code is a script and isn't checked |
+| Groovy24EmptyElement | on | an empty argument, list element or map entry, `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`: Groovy 2.4 (Hubitat, SmartThings) drops it, and Groovy 3 and later reject the file. It is on by default because the extra comma never does anything, so removing it is safe on every version. The formatter keeps it as written |
 
 A block holding only a comment doesn't count as empty.
 
@@ -317,7 +318,7 @@ It reads these formats:
 - `codenarc.properties`, whose `RuleName.enabled = false` lines turn rules off. Named with rulesets, it adjusts the rules they define, as in CodeNarc.
 - npm-groovy-lint's `.groovylintrc.json`, with its `extends` presets and its `rules`, where `"off"`, `enabled: false`, `disabled: true` and `severity: "off"` turn a rule off. With `codenarcRulesets`, those files are read instead of `rules`, as npm-groovy-lint does.
 
-Excludes and includes take CodeNarc's wildcards (`Empty*`) and comma-separated lists. Each groovyfmt rule named after a CodeNarc rule comes out true or false as the configuration says. A rule the configuration doesn't enable comes out false, since CodeNarc wouldn't run it. groovyfmt's Jenkins, Gradle and Spock rules and UnusedSuppression keep their defaults. From a `codenarc.properties` alone, only the rules it names are set.
+Excludes and includes take CodeNarc's wildcards (`Empty*`) and comma-separated lists. Each groovyfmt rule named after a CodeNarc rule comes out true or false as the configuration says. A rule the configuration doesn't enable comes out false, since CodeNarc wouldn't run it. groovyfmt's Jenkins, Gradle and Spock rules, UnusedSuppression and Groovy24EmptyElement keep their defaults. From a `codenarc.properties` alone, only the rules it names are set.
 
 The report after the table lists, of the rules the configuration enables:
 

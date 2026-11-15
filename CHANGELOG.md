@@ -2,10 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Lint rule `Groovy24EmptyElement` (on by default): an empty argument, list element or map entry, `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`, which Groovy 2.4 drops and Groovy 3 and later reject. It is reported at each extra comma. ([#105](https://github.com/costajohnt/groovyfmt/issues/105))
+
 ### Fixed
 
 - Default mode keeps tab-aligned columns when it re-indents a line by other than a whole tab stop: a tab between two tokens on such a line becomes the spaces up to its tab stop of the line as written, the same tabs and spaces `normalize_spacing` expands. Running `normalize_spacing` on default-formatted output now gives what it gives on the original, instead of splitting a tab-aligned map into two columns or collapsing it. Lines with no tab after their indent, and lines whose indent moves by whole tab stops, are unchanged; tabs in strings and comments and before a trailing comment stay. ([#133](https://github.com/costajohnt/groovyfmt/issues/133))
 - `--explain UnusedPrivateMethod` and `--explain UnusedPrivateField` cover a private member used only by a DSL script that runs with the class as its delegate (`DelegatingScript`, a builder), and recommend `@SuppressWarnings('UnusedPrivateMethod')` / `('UnusedPrivateField')` on the member or class. UnusedImport on an aliased import (`import a.B as C`) names the alias: `The alias [C] of the [a.B] import is never referenced`. ([#117](https://github.com/costajohnt/groovyfmt/issues/117))
+- The grammar pin moves to tree-sitter-groovy 84f3ad2. Newly accepted, as Groovy reads them: a lambda whose body is a command call (`[1, 2].each(v -> println v)`, `def f = (x) -> println x`, Groovy 3 and 4, [#137](https://github.com/costajohnt/groovyfmt/issues/137)); Groovy 2.4's empty argument, list element and map entry (`foo(a,,b)`, `["off", "cool", , "heat"]`, `[a: 1,, b: 2]`), which formatting keeps as written: no space is added or removed between its commas or after the last one, and a line is never broken there ([#105](https://github.com/costajohnt/groovyfmt/issues/105)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): a multiple assignment as a `for` loop's init (`for (def (int i, int j) = [0, 0]; i < 5; i++)`), type-use annotations on a type-parameter bound (`<T extends @Deprecated CharSequence>`), named and spread-map indexes (`A[x: 1, y: 2]`, `A[*: m]`), several or named indexes after `?[` (`a?[1, 2]`, `A?[name: 1]`), and a triple-quoted string whose content ends with its quote character (`'''a='b''''`, `"""say "hi"""""`).
 
 ## 0.18.0 (2026-11-15)
 

@@ -263,6 +263,57 @@ fn hubitat_include_lines_are_kept_as_written() {
     assert_eq!(stdout(&l), "");
 }
 
+#[test]
+fn groovy24_empty_elements_are_kept_as_written_and_linted() {
+    let d = Dir::new("empty-element");
+    let src = "def f() {\nfoo(a,,b)\nfoo(a , , b)\ndef l = [\"off\", \"cool\", , \"heat\"]\ndef m = [a: 1,, b: 2]\nbar(first_argument, second_argument,, third_argument)\n}\n";
+    let pretty = "def f() {\n    foo(a,,b)\n    foo(a , , b)\n    def l = [\"off\", \"cool\", , \"heat\"]\n    def m = [a: 1,, b: 2]\n    bar(first_argument, second_argument,, third_argument)\n}\n";
+    // `normalize_spacing` and wrapping leave the empty slot alone too
+    d.write(
+        ".groovyfmt.toml",
+        "normalize_spacing = true\nmax_line_length = 40\n",
+    );
+    d.write("Driver.groovy", src);
+    let w = run(&d.0, &["--strict"], None);
+    assert_eq!(w.status.code(), Some(0), "{}", stderr(&w));
+    let out = d.read("Driver.groovy");
+    assert_eq!(out, pretty.replace("foo(a , ,", "foo(a, ,"));
+    assert_eq!(
+        run(&d.0, &["--check", "--strict"], None).status.code(),
+        Some(0)
+    );
+    d.write(".groovyfmt.toml", "");
+    d.write("Driver.groovy", src);
+    assert_eq!(run(&d.0, &["--strict"], None).status.code(), Some(0));
+    assert_eq!(d.read("Driver.groovy"), pretty);
+
+    let l = run(&d.0, &["--lint"], None);
+    assert_eq!(l.status.code(), Some(1));
+    let text = stdout(&l);
+    let found: Vec<&str> = text
+        .lines()
+        .filter(|s| s.contains("Groovy24EmptyElement"))
+        .map(|s| s.split(": ").next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "Driver.groovy:2:11",
+            "Driver.groovy:3:13",
+            "Driver.groovy:4:29",
+            "Driver.groovy:5:19",
+            "Driver.groovy:6:41"
+        ],
+        "{text}"
+    );
+    assert!(text.contains("Driver.groovy:2:11: Groovy24EmptyElement: An empty argument"));
+    d.write(".groovyfmt.toml", "[lint]\nGroovy24EmptyElement = false\n");
+    assert!(!stdout(&run(&d.0, &["--lint"], None)).contains("Groovy24EmptyElement"));
+    let e = run(&d.0, &["--explain", "Groovy24EmptyElement"], None);
+    assert_eq!(e.status.code(), Some(0), "{}", stderr(&e));
+    assert!(stdout(&e).contains("Groovy 2.4"), "{}", stdout(&e));
+}
+
 const BROKEN_AT: &str =
     "Broken.groovy:1:10: could not parse: expected `}` to close the `{` on line 1\n";
 

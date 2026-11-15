@@ -9,6 +9,7 @@ By default, formatting changes whitespace only:
 - Lines inside multi-line strings and comments are left exactly as they are.
 - Tabs after the indent stay tabs, except on a line whose indent moves by other than a whole tab stop (8 columns, or `indent` with `use_tabs`): there a tab between two tokens becomes the spaces up to its tab stop of the line as written, so tab-aligned columns (`\t\tname:\t\t\t"x"` above `\t\tmultiple:\t\ttrue`) still line up under the new indent. These are the same tabs, turned into the same spaces, as [`normalize_spacing`](#spacing-within-lines) expands, so running it on default-formatted output gives what running it on the original does. Tabs in strings and comments, and in gaps `normalize_spacing` leaves as written (such as before a trailing comment), stay.
 - A Hubitat `#include namespace.Library` line that starts at column 0 is kept as written. The hub expands it before compiling and Groovy itself rejects it, so groovyfmt reads it as a comment: the rest of the file is formatted and linted, and lint ignores the line.
+- Groovy 2.4's empty argument, list element or map entry (`foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`) is kept as written: the spaces between its commas and after the last one never change, and no line breaks there. Groovy 3 and later reject it; the lint rule [Groovy24EmptyElement](lint.md#general) reports it.
 
 Two config options do more, and both are off by default. [`normalize_spacing`](#spacing-within-lines) fixes the spaces between tokens within a line. [`max_line_length`](#line-wrapping) also adds line breaks.
 
@@ -46,6 +47,7 @@ Some spacing is left as written because changing it could change what the code m
 - a binary operator with a space before it and none after (`a -b`, `println -1`)
 - `<` and `>` comparisons chained like a generic type (`x as Kind<Path>[]`)
 - a closure parameter's default (`{ int b=2 -> }`)
+- Groovy 2.4's empty element (`foo(a,,b)`, `[a, , b]`): between its commas and after the last one
 - closures that look like template placeholders (`{{name}}`, `${x}` outside a string, a closure standing alone as a statement)
 
 ### Alignment
@@ -107,7 +109,7 @@ These are never broken, because Groovy or the grammar might read the result diff
 - Anything inside a closure or block written on one line (`list.each { foo(a, b) }`), whose statements end at line breaks.
 - Between `return`, `throw`, `assert`, `new`, `as`, `in`, `instanceof` or `!` and what follows, between a name and its `(`, between `)` and a trailing closure, and anywhere the line before the break could end a statement by itself.
 - Outside `(…)` and `[…]`, a wrapped line never starts with `{`, `++`, `--`, `+`, `-`, `*` or `/` (a `*.` of a chain aside). It starts with `(`, `[` or a string only right after a line ending in a binary operator, `?`, `:` or `=`, which the grammar says must continue. Inside brackets Groovy's lexer drops the line break, so an argument such as `-1` or `'text'` may start a line.
-- In an annotation, anything but its brackets: its argument list and the lists in it (an operator or a chain in them stays whole), and an annotation followed on its line by more (`@A(x, y) def f()`). `import` and `package` lines, `case` labels, Spock `where:` blocks, GString interpolations, and argument lists, parameter lists or literals holding a comment.
+- In an annotation, anything but its brackets: its argument list and the lists in it (an operator or a chain in them stays whole), and an annotation followed on its line by more (`@A(x, y) def f()`). `import` and `package` lines, `case` labels, Spock `where:` blocks, GString interpolations, and argument lists, parameter lists or literals holding a comment or a Groovy 2.4 empty element (`foo(a,,b)`).
 - `<`, `>`, `as`, `instanceof`, `in`, ranges, shifts and the other operators. Only the ones above are break points. Nothing breaks right after a `>` either, since tree-sitter-groovy reads `f(a, List<T>` followed by a line break as comparisons. A class header is the exception, where a `>` closes a type (`class A<T>` then `extends B<T>`).
 - A part of a larger construct on the line that can't break itself:
   - an operator expression inside another operator's operand (`(a != null && b) ? x : y`), in parentheses (`(a ?: b).c()`) or in a subscript (`a[i + 1]`)
