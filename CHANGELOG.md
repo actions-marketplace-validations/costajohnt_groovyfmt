@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.15.1 (2026-11-14)
+## 0.15.2 (2026-11-14)
+
+0.15.1 was tagged but never published: a JetBrains plugin test raced LSP4IJ and failed the release build. 0.15.2 is the same code with that test fixed.
 
 ### Fixed
 
