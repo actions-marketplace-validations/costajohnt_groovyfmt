@@ -1945,6 +1945,29 @@ fn a_src_directory_above_the_project_does_not_make_its_output_source() {
 }
 
 #[test]
+fn build_is_output_only_in_a_project_with_a_build_file() {
+    // a Jenkins job repository: a `.git` and no build file, so `build` is a plain directory
+    let d = Dir::new("gitonly");
+    std::fs::create_dir_all(d.0.join(".git")).unwrap();
+    d.write("jobs/build/x/Jenkinsfile", UGLY);
+    let o = run(&d.0, &["--check"], None);
+    assert_eq!(stdout(&o), "jobs/build/x/Jenkinsfile\n");
+    let o = run(&d.0, &["--check", "jobs"], None);
+    assert_eq!(stdout(&o), "jobs/build/x/Jenkinsfile\n");
+    // with a build file at the root, it is output again
+    d.write("build.gradle", PRETTY);
+    d.write("jobs/build/x.groovy", UGLY);
+    let o = run(&d.0, &["--check", "-v"], None);
+    assert_eq!(stdout(&o), "");
+    let err = stderr(&o);
+    assert!(err.contains("skipped dir .git: hidden\n"), "{err}");
+    assert!(
+        err.contains("skipped dir jobs/build: build output\n"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_walk_takes_a_jenkinsfile_with_a_suffix_only_when_it_parses() {
     let d = Dir::new("jsuffix");
     d.write(".groovyfmt.toml", "normalize_spacing = true\n");

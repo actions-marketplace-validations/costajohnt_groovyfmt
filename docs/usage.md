@@ -56,10 +56,10 @@ Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, a
 
 - hidden directories
 - `out`, `target` and `node_modules`
-- `build`, Gradle's output directory, unless a `src` directory lies between it and its project: there `build` is a package (`src/main/groovy/org/acme/build`) and is searched. The project is the nearest directory above the `build` directory holding a `build.gradle`, `build.gradle.kts`, `settings.gradle`, `settings.gradle.kts`, `pom.xml` or `.git`, so `sub/build` is skipped even when `sub` has no build file of its own, and a `src` above the project (a checkout under `~/src`) doesn't count. With none of those above it, a `src` anywhere in its path makes it a package
+- `build`, Gradle's output directory, when its project has a build file and no `src` directory lies between them. The project is the nearest directory above the `build` directory holding a `build.gradle`, `build.gradle.kts`, `settings.gradle`, `settings.gradle.kts`, `pom.xml` or `.git`, so `sub/build` is skipped even when `sub` has no build file of its own. Under `src` it is a package (`src/main/groovy/org/acme/build`) and is searched; a `src` above the project (a checkout under `~/src`) doesn't count. In a repository with a `.git` but no build file (a Jenkins job repository's `jobs/build/`) it is an ordinary directory and is searched. With none of those above it, a `src` anywhere in its path makes it a package
 - anything matching the config's [`exclude`](configuration.md#exclude) patterns
 
-A file named on the command line is processed even inside a skipped directory, unless it or a directory above it matches `exclude`.
+`-v` reports each skipped directory and why (`skipped dir jobs/build: build output`). A file named on the command line is processed even inside a skipped directory, unless it or a directory above it matches `exclude`.
 
 A file named on the command line must still be Groovy by its name. That means one of:
 

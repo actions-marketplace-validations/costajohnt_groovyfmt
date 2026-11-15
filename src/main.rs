@@ -83,8 +83,8 @@ Options:
       --fix                With --lint: remove unused, duplicate and same-package
                            imports and unnecessary semicolons in place (violations marked
                            \"(fixable)\"), then report what remains
-  -v, --verbose            Also report skipped files, where each one failed to parse,
-                           and timing
+  -v, --verbose            Also report skipped files and directories, where each file
+                           failed to parse, and timing
   -h, --help               Print help
   -V, --version            Print version
       --                   Treat every later argument as a PATH
@@ -154,6 +154,8 @@ fn die(msg: impl std::fmt::Display) -> ! {
 /// Set when a directory couldn't be read during the walk, or an argument was refused; the
 /// run then exits 2.
 static WALK_FAILED: AtomicBool = AtomicBool::new(false);
+/// `-v`: report each directory a walk skips.
+static WALK_VERBOSE: AtomicBool = AtomicBool::new(false);
 
 /// One line to stdout. Write errors are ignored, so `groovyfmt --check | head -1` stops
 /// printing quietly instead of panicking; the exit status still reflects the results.
@@ -390,7 +392,14 @@ fn walk(
     };
     let Ok(meta) = meta else { return };
     let wanted = if meta.is_dir() {
-        top || !groovyfmt::is_skipped_dir(p)
+        let why = (!top).then(|| groovyfmt::skipped_dir(p)).flatten();
+        if let Some(why) = why.filter(|_| WALK_VERBOSE.load(Ordering::Relaxed)) {
+            eprintln!(
+                "skipped dir {}: {why}",
+                shown(p.strip_prefix(".").unwrap_or(p))
+            );
+        }
+        why.is_none()
     } else {
         meta.is_file() && (top || groovyfmt::is_walked_file(p))
     };
@@ -1044,6 +1053,10 @@ fn main() {
         _ => {
             // only write mode and --fix rewrite; reading through a named link is reading its target
             let write = a.mode == Mode::Write || (a.fix && !a.diff);
+            WALK_VERBOSE.store(
+                a.verbose && !matches!(a.mode, Mode::Errors | Mode::Tree),
+                Ordering::Relaxed,
+            );
             let (mut files, links, cfgs) = collect(&a.paths, &mut res, write);
             if let Some(rev) = &a.changed_since {
                 let changed = git_changed(rev);

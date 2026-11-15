@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A directory walk no longer skips `build` directories in a repository with a `.git` but no Gradle or Maven build file, such as a Jenkins job repository's `jobs/build/x/Jenkinsfile`. A `build` directory is output only when its project (the nearest directory above it with a `build.gradle(.kts)`, `settings.gradle(.kts)`, `pom.xml` or `.git`) has one of those build files and no `src` directory lies between them, so Gradle's output, a subproject's included, stays skipped. `-v` now reports each directory a walk skips and why (`skipped dir jobs/build: build output`, `skipped dir .git: hidden`). (#98)
+
 ## 0.15.2 (2026-11-14)
 
 0.15.1 was tagged but never published: a JetBrains plugin test raced LSP4IJ and failed the release build. 0.15.2 is the same code with that test fixed.
