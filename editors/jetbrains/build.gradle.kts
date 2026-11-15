@@ -103,4 +103,6 @@ tasks.test {
     providers.environmentVariable("GROOVYFMT_BIN").orNull?.let { systemProperty("groovyfmt.bin", it) }
     // No groovyfmt on PATH in the tests: only the one a test sets up is found.
     environment("PATH", "/usr/bin:/bin")
+    // the failure's message in the console: CI keeps no test reports
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
 }
