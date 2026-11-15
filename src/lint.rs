@@ -468,6 +468,15 @@ pub const RULES: &[Rule] = &[
         good: "// MathSpec.groovy\nclass MathSpec {\n}",
         fixable: false,
     },
+    Rule {
+        name: "Groovy24EmptyElement",
+        default: true,
+        description: "an empty argument, list element or map entry (`foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`), which Groovy 2.4 drops and Groovy 3 and later reject",
+        why: "Groovy 2.4 (Hubitat, SmartThings) ignores the extra comma, so it does nothing there, and Groovy 3 and later refuse to compile the file. Removing it changes nothing on 2.4 and makes the code portable.",
+        bad: "def modes = [\"off\", \"cool\", , \"heat\"]\nsetModes(modes,, true)",
+        good: "def modes = [\"off\", \"cool\", \"heat\"]\nsetModes(modes, true)",
+        fixable: false,
+    },
     // Unused code (src/lint/unused.rs)
     Rule {
         name: "UnusedPrivateField",

@@ -39,6 +39,9 @@ pub(super) const KINDS: &[&str] = &[
     "instanceof_expression",
     "parenthesized_type_cast",
     "field_declaration",
+    "argument_list",
+    "list_literal",
+    "map_literal",
 ];
 
 /// Ids of the fields read on every binary expression and call. By name, each lookup
@@ -107,6 +110,7 @@ pub(super) fn check(src: &str, nodes: &[Node], v: &mut Vec<Violation>) {
             }
             "object_creation_expression" => big_decimal(src, n, v),
             "unary_expression" => double_negative(src, n, v),
+            "argument_list" | "list_literal" | "map_literal" => empty_element(n, v),
             "synchronized_statement" if is_empty_block(n.child_by_field_name("body")) => {
                 v.push(at(
                     n,
@@ -1172,6 +1176,30 @@ fn double_negative(src: &str, n: Node, v: &mut Vec<Violation>) {
     }
 }
 
+/// Groovy24EmptyElement: `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`, reported at each comma
+/// that follows another one.
+fn empty_element(n: Node, v: &mut Vec<Violation>) {
+    let what = match n.kind() {
+        "argument_list" => "argument",
+        "list_literal" => "list element",
+        _ => "map entry",
+    };
+    let mut after_comma = false;
+    for k in n.children(&mut n.walk()) {
+        if k.kind().contains("comment") {
+            continue;
+        }
+        if k.kind() == "," && after_comma {
+            v.push(at(
+                k,
+                "Groovy24EmptyElement",
+                format!("An empty {what}: Groovy 2.4 drops it and Groovy 3 and later reject it; remove the extra comma"),
+            ));
+        }
+        after_comma = k.kind() == ",";
+    }
+}
+
 /// UnnecessaryInstanceOfCheck: `!x instanceof T`, which tests the boolean `!x`.
 fn instanceof_not(src: &str, n: Node, v: &mut Vec<Violation>) {
     let Some(x) = n
@@ -1552,6 +1580,19 @@ mod tests {
         assert_eq!(
             rules(src, "BitwiseOperatorInConditional"),
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11]
+        );
+    }
+
+    #[test]
+    fn groovy24_empty_element() {
+        let ok = "foo(a, b)\ndef l = [a, b,]\ndef m = [a: 1, b: 2]\n";
+        assert!(rules(ok, "Groovy24EmptyElement").is_empty());
+        let src = "foo(a,,b)\ndef l = [\"off\", , \"heat\"]\ndef m = [a: 1,, b: 2]\nfoo(a,,, b)\nfoo(a, /* x */ , b)\n";
+        assert_eq!(rules(src, "Groovy24EmptyElement"), vec![1, 2, 3, 4, 4, 5]);
+        assert!(msgs("foo(a,,b)\n", "Groovy24EmptyElement")[0].starts_with("An empty argument"));
+        assert!(
+            msgs("def m = [a: 1,, b: 2]\n", "Groovy24EmptyElement")[0]
+                .starts_with("An empty map entry")
         );
     }
 

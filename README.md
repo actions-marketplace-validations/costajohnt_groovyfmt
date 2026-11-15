@@ -97,7 +97,7 @@ exclude = ["generated/**"]
 
 ## Linting
 
-`groovyfmt --lint` has 77 rules, 55 of them on by default. The general rules are named after their [CodeNarc](https://codenarc.org/) equivalents. The Jenkinsfile, Gradle and Spock rules catch mistakes those tools otherwise report only when a build runs. `groovyfmt --rules` lists them all.
+`groovyfmt --lint` has 78 rules, 56 of them on by default. The general rules are named after their [CodeNarc](https://codenarc.org/) equivalents. The Jenkinsfile, Gradle and Spock rules catch mistakes those tools otherwise report only when a build runs. `groovyfmt --rules` lists them all.
 
 - Turn rules on or off in the `[lint]` table of `.groovyfmt.toml`.
 - Moving from CodeNarc or npm-groovy-lint, `groovyfmt --import-codenarc <config>` prints that table from your existing configuration, with what it can't carry over ([migrating from CodeNarc](https://github.com/costajohnt/groovyfmt/blob/main/docs/lint.md#migrating-from-codenarc)).
@@ -153,7 +153,7 @@ Against [npm-groovy-lint](https://github.com/nvuillam/npm-groovy-lint) 19.0.1 (C
 | lint, npm-groovy-lint's default rule set | 30.3 s | |
 | format | did not finish in 15 min (two attempts) | 0.19 s |
 
-The groovyfmt figures were measured on 2026-11-10 with a build between 0.5.0 and 0.6.0, when 14 rules were on by default. Today 55 are.
+The groovyfmt figures were measured on 2026-11-10 with a build between 0.5.0 and 0.6.0, when 14 rules were on by default. Today 56 are.
 
 The comparison flatters groovyfmt somewhat. It skips the 9 spock files it can't parse, which npm-groovy-lint still processes, and CodeNarc's default rule set is far larger. All 9 are generated AST snapshots used as test fixtures, and 8 of them aren't valid Groovy source.
 
