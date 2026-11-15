@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The grammar pin moves to tree-sitter-groovy 7be76f7. Newly accepted, as Groovy reads them: a comparison or other expression as a Groovy 4 switch arrow case label (`case a < b -> 3`, `case c > d -> 4`); the name before `->` was read as a lambda's parameter ([#131](https://github.com/costajohnt/groovyfmt/issues/131)). `case FOO ->`, `case String ->`, `case List<String> ->`, `case 1 ->` and `case APRIL, MAY ->` are as before. A Hubitat `#include namespace.Library` line at column 0 is read as a comment and kept as written, so drivers and apps that use Hubitat libraries are formatted and linted instead of skipped ([#115](https://github.com/costajohnt/groovyfmt/issues/115)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): several `#!` lines opening a script (nix-shell style).
+
 ## 0.17.0 (2026-11-15)
 
 ### Fixed

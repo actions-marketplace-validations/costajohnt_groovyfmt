@@ -7,6 +7,7 @@ By default, formatting changes whitespace only:
 - Every line is re-indented from the parse tree (blocks, closures, argument lists, list and map literals, continued expressions, Spock `when:` / `then:` blocks).
 - Trailing whitespace is removed, runs of blank lines collapse to one, and the file ends with one newline.
 - Lines inside multi-line strings and comments are left exactly as they are.
+- A Hubitat `#include namespace.Library` line that starts at column 0 is kept as written. The hub expands it before compiling and Groovy itself rejects it, so groovyfmt reads it as a comment: the rest of the file is formatted and linted, and lint ignores the line.
 
 Two config options do more, and both are off by default. [`normalize_spacing`](#spacing-within-lines) fixes the spaces between tokens within a line. [`max_line_length`](#line-wrapping) also adds line breaks.
 

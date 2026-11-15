@@ -239,6 +239,30 @@ fn strict_fails_on_skipped_files_and_lists_them() {
     );
 }
 
+/// Hubitat `#include ns.Library` lines (expanded by the hub, rejected by Groovy) are kept
+/// byte for byte and the rest of the file is formatted and linted (#115).
+#[test]
+fn hubitat_include_lines_are_kept_as_written() {
+    let d = Dir::new("hubitat");
+    let src = "#include ShellyUSA.ShellyUSA_Driver_Library\nimport groovy.transform.Field\n#include kurtsanders.AWSLibrary\nmetadata {\ndefinition(name: 'X', namespace: 'y') {\ncapability 'Switch'\n}\n}\n\ndef on() {\nsendEvent(name: 'switch', value: 'on')\n}\n#include esphome.espHomeApiHelper\n";
+    let pretty = "#include ShellyUSA.ShellyUSA_Driver_Library\nimport groovy.transform.Field\n#include kurtsanders.AWSLibrary\nmetadata {\n    definition(name: 'X', namespace: 'y') {\n        capability 'Switch'\n    }\n}\n\ndef on() {\n    sendEvent(name: 'switch', value: 'on')\n}\n#include esphome.espHomeApiHelper\n";
+    d.write("Driver.groovy", src);
+    assert_eq!(
+        run(&d.0, &["--check", "--strict"], None).status.code(),
+        Some(1)
+    );
+    let w = run(&d.0, &["--strict"], None);
+    assert_eq!(w.status.code(), Some(0), "{}", stderr(&w));
+    assert_eq!(d.read("Driver.groovy"), pretty);
+    assert_eq!(
+        run(&d.0, &["--check", "--strict"], None).status.code(),
+        Some(0)
+    );
+    let l = run(&d.0, &["--lint", "--strict"], None);
+    assert_eq!(l.status.code(), Some(0), "{}{}", stdout(&l), stderr(&l));
+    assert_eq!(stdout(&l), "");
+}
+
 const BROKEN_AT: &str =
     "Broken.groovy:1:10: could not parse: expected `}` to close the `{` on line 1\n";
 
