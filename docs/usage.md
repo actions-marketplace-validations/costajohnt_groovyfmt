@@ -52,7 +52,7 @@ groovyfmt [OPTIONS] [PATH]...
 
 With no paths, groovyfmt works on the current directory.
 
-Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, and pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` (`Jenkinsfile_k8s`) or `*.jenkinsfile` (in any case, so `ci/release.Jenkinsfile` too), the names the [editor plugins](editors.md) treat as Groovy. A `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*` not ending in `.groovy` is taken only if it parses as Groovy, so a template or a disabled copy that doesn't is left out without a word; one whose suffix says it is something else (`Jenkinsfile.md`, `Jenkinsfile_k8s.md`, `.txt`, `.bak`, `.yml`, `.json`, `.j2`, `.tpl`, `.patch`, `.ini` and a few more) or ending in `~` isn't even read. The search skips:
+Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, and pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` (`Jenkinsfile_k8s`), `*-Jenkinsfile`, `*_Jenkinsfile` (`jenkins/rstan-Jenkinsfile`), `*.jenkinsfile` or `*.jenkins` (those two in any case, so `ci/release.Jenkinsfile` too), the names the [editor plugins](editors.md) treat as Groovy. A `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile` or `*.jenkins` not ending in `.groovy` is taken only if it parses as Groovy, so a template or a disabled copy that doesn't is left out without a word; one whose suffix says it is something else (`Jenkinsfile.md`, `Jenkinsfile_k8s.md`, `.txt`, `.bak`, `.yml`, `.json`, `.j2`, `.tpl`, `.patch`, `.ini` and a few more) or ending in `~` isn't even read. A file with no extension (`bin/release`, but not one ending in `~`) is taken when its first line is a `#!` that runs groovy: `#!groovy`, `#!/usr/bin/groovy` or `#!/usr/bin/env groovy`, with or without arguments. Only its first 256 bytes are read for that; a file with any other extension is never opened. The search skips:
 
 - hidden directories
 - `out`, `target` and `node_modules`
@@ -64,8 +64,8 @@ Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, a
 A file named on the command line must still be Groovy by its name. That means one of:
 
 - a name a directory search would find
-- any pipeline named `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` or `*.jenkinsfile`, whatever its suffix
-- a script whose first line is a `#!` that runs groovy
+- any pipeline named `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, whatever it holds
+- a script whose first line is a `#!` that runs groovy, whatever its name or extension
 
 Any other named file (a Makefile or YAML file passed by `groovyfmt *`) is skipped and listed under `-v` or `--strict` as `not a Groovy file`. `--force` reads every named file as Groovy whatever its name.
 

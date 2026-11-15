@@ -39,7 +39,7 @@ vim.lsp.enable("groovyfmt")
 
 ### VS Code
 
-The groovyfmt extension (`groovyfmt.groovyfmt`, source in [`editors/vscode`](../editors/vscode)) starts the language server with no setup. It covers `*.groovy`, `*.gvy`, `*.gy`, `*.gsh`, `*.gradle`, `*.jenkinsfile`, `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*` and `Jenkinsfile-*`, alongside VS Code's built-in Groovy support or any other Groovy, Gradle or Jenkins extension.
+The groovyfmt extension (`groovyfmt.groovyfmt`, source in [`editors/vscode`](../editors/vscode)) starts the language server with no setup. It covers `*.groovy`, `*.gvy`, `*.gy`, `*.gsh`, `*.gradle`, `*.jenkinsfile`, `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile` and `*.jenkins`, alongside VS Code's built-in Groovy support or any other Groovy, Gradle or Jenkins extension.
 
 It runs `groovyfmt.path` if set, else the workspace's npm package (`node_modules`), else `groovyfmt` on `PATH`. With none of those, it offers to download the release matching its own version, checked against the SHA-256 checksums that release of the extension carries (taken from the archives when the release was built). In an untrusted workspace it ignores `groovyfmt.path` from workspace settings and `node_modules`, and a relative `groovyfmt.path` in user settings is refused. Its [README](../editors/vscode/README.md) has the details.
 
@@ -70,7 +70,7 @@ Until it is on JetBrains Marketplace, install LSP4IJ from the Marketplace, then 
 With LSP4IJ installed, groovyfmt also runs as an LSP4IJ user-defined language server, with no groovyfmt plugin. In **Settings | Languages & Frameworks | Language Servers**, add a server with **+**:
 
 - **Server** tab: name `groovyfmt`, command `/path/to/groovyfmt --lsp` (the full path: an IDE started from the Dock or a launcher may not see your shell's `PATH`).
-- **Mappings** tab, **File name patterns**: the patterns `*.groovy;*.gvy;*.gy;*.gsh;*.gradle;*.jenkinsfile;Jenkinsfile;Jenkinsfile.*;Jenkinsfile_*;Jenkinsfile-*` with the **Language ID** `groovy`.
+- **Mappings** tab, **File name patterns**: the patterns `*.groovy;*.gvy;*.gy;*.gsh;*.gradle;*.jenkinsfile;*.jenkins;Jenkinsfile;Jenkinsfile.*;Jenkinsfile_*;Jenkinsfile-*;*-Jenkinsfile;*_Jenkinsfile` with the **Language ID** `groovy`.
 - **Configuration** tab, **Client**: `{"format": {"existingFormatterOverrideable": true}}` if Reformat Code should run groovyfmt in place of the IDE's Groovy formatter. Without it, Reformat Code runs groovyfmt only in files the IDE has no formatter for.
 
 Diagnostics, quick fixes and Reformat Code then come from groovyfmt. The plugin's integration tests run this setup, as LSP4IJ 0.21.0 creates it, in IntelliJ IDEA Community 2024.2. It runs whatever binary the command names, in every project, trusted or not, and nothing downloads groovyfmt for you.

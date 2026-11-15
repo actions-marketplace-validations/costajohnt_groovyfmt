@@ -55,7 +55,7 @@ val notFoundShown = AtomicBoolean()
 private val LOG = logger<GroovyfmtService>()
 
 /** The files groovyfmt formats, as plugin.xml maps them to the server. */
-private val FILE_NAMES = Regex("""^(.*\.(groovy|gvy|gy|gsh|gradle|jenkinsfile)|Jenkinsfile([._-].*)?)$""")
+private val FILE_NAMES = Regex("""^(.*\.(groovy|gvy|gy|gsh|gradle|jenkinsfile|jenkins)|Jenkinsfile([._-].*)?|.*[_-]Jenkinsfile)$""")
 
 fun isGroovyfmtFile(file: VirtualFile) = file.isInLocalFileSystem && FILE_NAMES.matches(file.name)
 

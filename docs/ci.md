@@ -63,10 +63,12 @@ repos:
         name: groovyfmt
         entry: groovyfmt
         language: system
-        files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile([_-][^/.~]+)?|\.(?i:jenkinsfile))$
+        files: (\.(groovy|gradle|gvy|gy|gsh)|(^|/)Jenkinsfile([_-][^/.~]+)?|[_-]Jenkinsfile|\.(?i:jenkins(file)?))$
 ```
 
-The hooks take `Jenkinsfile`, `*.jenkinsfile` (any case), `Jenkinsfile.groovy`, and `Jenkinsfile_*` or `Jenkinsfile-*` with no dot or `~` in the rest of the name (`Jenkinsfile_k8s`, `Jenkinsfile-release`; a template so named is formatted too, so list it in `exclude`), but not other `Jenkinsfile.*` names: a directory walk reads those first and skips any that is not Groovy (a template, a patch), and pre-commit names files explicitly, which groovyfmt always takes. Add the ones that are pipelines to the hook's `files` yourself.
+The hooks take `Jenkinsfile`, `*.jenkinsfile` and `*.jenkins` (any case), `*-Jenkinsfile` and `*_Jenkinsfile`, `Jenkinsfile.groovy`, and `Jenkinsfile_*` or `Jenkinsfile-*` with no dot or `~` in the rest of the name (`Jenkinsfile_k8s`, `Jenkinsfile-release`; a template so named is formatted too, so list it in `exclude`), but not other `Jenkinsfile.*` names: a directory walk reads those first and skips any that is not Groovy (a template, a patch), and pre-commit names files explicitly, which groovyfmt always takes. Add the ones that are pipelines to the hook's `files` yourself.
+
+The hooks match by name, so an extensionless script found only by its `#!groovy` line (which a directory walk takes) isn't matched. List those in `files` too. `types: [groovy]` doesn't help: pre-commit's file identification ([identify](https://github.com/pre-commit/identify)) reads shebangs only of executable files and has no mapping for a `groovy` interpreter, so such a script gets no `groovy` tag.
 
 pre-commit passes the staged files by name, and `exclude` in `.groovyfmt.toml` still applies to them. So generated code stays untouched without repeating the patterns in the hook.
 
