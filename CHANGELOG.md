@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- A directory walk no longer skips a package named `build` inside a `src` directory (`src/main/groovy/org/acme/build/X.groovy`, `buildSrc/src/main/groovy/.../build`). A `build` directory counts as a package only when a `src` directory lies between it and its project, the nearest directory above it with a `build.gradle(.kts)`, `settings.gradle(.kts)`, `pom.xml` or `.git`; so Gradle's output stays skipped, a subproject's included without a build file of its own too, and a checkout kept under `~/src` doesn't count. (#83)
+- A directory walk finds pipelines named `*.Jenkinsfile`, `*.jenkinsfile` and `Jenkinsfile.*`, as the editor plugins do. A `Jenkinsfile.*` other than `Jenkinsfile.groovy` is taken only if it parses as Groovy, and one whose suffix marks docs, data, a template, a patch or a backup (`Jenkinsfile.md`, `.j2`, `.patch`, `.bak`, a trailing `~`) isn't read at all, so a walk never fails on or rewrites a `Jenkinsfile.tpl`. The pre-commit hooks take `*.jenkinsfile` too. The Jenkinsfile lint rules apply to `*.Jenkinsfile` too. (#84)
+- `normalize_spacing` treats a tab between two tokens as spaces to the next tab stop (every 8 columns, or `indent` with `use_tabs`), as an editor shows it: `foo(a,\tb)`, `if (x)\t{ }` and `def a =\t1` get their one space, as runs of spaces did. Tabs in indentation, strings, comments, Spock tables and gaps left as written stay. (#85)
+- EmptyForStatement no longer flags a for-in loop over anything but a literal (`for (d in data) {}` may be draining an iterator), or a `for (;;)` loop whose update calls or reads a field (`for (n = head; n.next != null; n = n.next) {}`), matching the `while` exemption. An empty loop over a literal list, map, range or string, and one that only counts (`for (int i = 0; i < n; i += 1) {}`), are still flagged. (#86)
+
 ### Security
 
 - The GitHub Action checks a download from an immutable release (v0.14.0 and later) against GitHub's release attestation with `gh release verify-asset`, so a replaced archive and `.sha256` no longer pass. It still compares the `.sha256` for every release, the older mutable ones included. The check needs gh 2.81.0 or later on the runner; with an older gh an immutable release fails to install rather than install unverified.

@@ -20,9 +20,11 @@ groovyfmt: formatter and linter for Groovy, Gradle build scripts, and Jenkinsfil
 Usage: groovyfmt [OPTIONS] [PATH]...
 
 PATHs are files or directories (default: the current directory). Directories are
-searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh and Jenkinsfile, skipping
-hidden directories, build, out, target and node_modules, and anything matching
-the config file's `exclude` patterns (which also apply to files named here).
+searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, Jenkinsfile.*
+(if it parses) and *.jenkinsfile, skipping hidden directories, out, target,
+node_modules, build (except a package named build under a src directory within
+its project), and anything matching the config file's `exclude` patterns (which
+also apply to files named here).
 Each file uses the nearest .groovyfmt.toml / groovyfmt.toml in its directory or
 above it; a nested config replaces its parent's, nothing is merged.
 
@@ -389,7 +391,7 @@ fn walk(
     let wanted = if meta.is_dir() {
         top || !groovyfmt::is_skipped_dir(p)
     } else {
-        meta.is_file() && (top || groovyfmt::is_groovy_file(p))
+        meta.is_file() && (top || groovyfmt::is_walked_file(p))
     };
     if !wanted {
         return;
@@ -544,7 +546,7 @@ const NOT_UTF8: &str = "not valid UTF-8";
 static FORCE: AtomicBool = AtomicBool::new(false);
 
 /// Whether a file is Groovy by its name or first line: a name a directory walk takes
-/// (`is_groovy_file`), a pipeline named `Jenkinsfile.*` or `*.jenkinsfile`, or a script whose
+/// (`is_groovy_file`), any pipeline name (`is_jenkinsfile`, even `Jenkinsfile.md`), or a script whose
 /// shebang runs groovy. Only files named on the command line can fail this; a Makefile or
 /// YAML file there (`groovyfmt *`) would parse as labels and lose its indentation.
 fn is_groovy(path: &Path, bytes: &[u8]) -> bool {
@@ -557,8 +559,7 @@ fn is_groovy(path: &Path, bytes: &[u8]) -> bool {
     };
     let first = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
     groovyfmt::is_groovy_file(Path::new(name))
-        || name.starts_with("Jenkinsfile.")
-        || name.ends_with(".jenkinsfile")
+        || groovyfmt::is_jenkinsfile(name)
         || (first.starts_with(b"#!") && first.windows(6).any(|w| w == b"groovy"))
 }
 

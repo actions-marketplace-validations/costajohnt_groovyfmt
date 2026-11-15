@@ -115,21 +115,138 @@ pub fn printable(s: &str) -> String {
         .replace("##[", "##\\[")
 }
 
-/// Groovy sources, Gradle build scripts, and Jenkinsfiles.
+/// Groovy sources, Gradle build scripts, and Jenkinsfiles: the names a directory walk takes.
+/// The same names the editor plugins treat as Groovy, except a backup (`Jenkinsfile~`) or a
+/// `Jenkinsfile.*` with a suffix that says it is something else (`Jenkinsfile.md`,
+/// `Jenkinsfile.j2`). A walk also reads a `Jenkinsfile.*` first (`is_walked_file`).
 pub fn is_groovy_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     [".groovy", ".gradle", ".gvy", ".gy", ".gsh"]
         .iter()
         .any(|ext| name.ends_with(ext))
-        || name == "Jenkinsfile"
+        || (is_jenkinsfile(name)
+            && !name.ends_with('~')
+            && !name.strip_prefix("Jenkinsfile.").is_some_and(|ext| {
+                NOT_GROOVY.contains(
+                    &ext.rsplit('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                )
+            }))
+}
+
+/// Whether a directory walk takes the file at `path`: a name `is_groovy_file` takes, and for
+/// a `Jenkinsfile.*` other than `Jenkinsfile.groovy`, contents that parse as Groovy. Such a
+/// name may be a template or a note (`Jenkinsfile.disabled`, `Jenkinsfile.tmpl`) that would
+/// only fail the run; one that doesn't parse is left out without a word, as a `.txt` file is.
+/// A file named on the command line is not read here, and is taken whatever it holds.
+pub fn is_walked_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !is_groovy_file(path) {
+        return false;
+    }
+    if !name.starts_with("Jenkinsfile.") || name.ends_with(".groovy") {
+        return true;
+    }
+    // too large or not UTF-8 is reported when it is read again, as for any other file
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() <= MAX_FILE_BYTES => {}
+        _ => return true,
+    }
+    match std::fs::read(path).map(String::from_utf8) {
+        Ok(Ok(src)) => !parse(&src).root_node().has_error(),
+        _ => true,
+    }
+}
+
+/// Suffixes of `Jenkinsfile.*` names that a directory walk leaves alone without reading them:
+/// docs, data, templates, patches and backup copies, which would not survive being formatted
+/// as Groovy.
+const NOT_GROOVY: &[&str] = &[
+    "md",
+    "txt",
+    "adoc",
+    "rst",
+    "html",
+    "orig",
+    "rej",
+    "bak",
+    "swp",
+    "tmp",
+    "yml",
+    "yaml",
+    "json",
+    "xml",
+    "properties",
+    "sh",
+    "bat",
+    "ps1",
+    "py",
+    "j2",
+    "tpl",
+    "tmpl",
+    "template",
+    "erb",
+    "mustache",
+    "hbs",
+    "patch",
+    "diff",
+    "cfg",
+    "ini",
+    "env",
+    "toml",
+    "log",
+];
+
+/// A pipeline by its name: `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile` (any case:
+/// `ci/release.Jenkinsfile`).
+pub fn is_jenkinsfile(name: &str) -> bool {
+    name == "Jenkinsfile"
+        || name.starts_with("Jenkinsfile.")
+        || name
+            .len()
+            .checked_sub(".jenkinsfile".len())
+            .and_then(|i| name.get(i..))
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(".jenkinsfile"))
 }
 
 /// Directories skipped while walking: hidden ones and common build/vendor output.
 /// A directory named explicitly on the command line is always entered.
+///
+/// `build` is Gradle's output directory, but also a fine package name
+/// (`src/main/groovy/org/acme/build`). It is a package, and entered, only when a directory
+/// named `src` lies between it and its project: the nearest directory above it holding a
+/// Gradle or Maven build file (`BUILD_FILES`) or a `.git`. So `lib/src/main/groovy/build`
+/// is entered and `sub/build` is skipped even in a subproject with no build file of its own,
+/// and a checkout kept under `~/src` doesn't count. Outside any project (no build file or
+/// `.git` above it), a `src` anywhere in its absolute path makes it a package. The path is
+/// absolute so a walk started inside `src` (`cd src/main/groovy; groovyfmt .`) counts.
 pub fn is_skipped_dir(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    name.starts_with('.') || matches!(name, "build" | "out" | "target" | "node_modules")
+    if name == "build" {
+        let full = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut in_src = false;
+        for a in full.ancestors().skip(1) {
+            if a.join(".git").exists() || BUILD_FILES.iter().any(|f| a.join(f).is_file()) {
+                break;
+            }
+            in_src |= a.file_name().is_some_and(|n| n == "src");
+        }
+        return !in_src;
+    }
+    name.starts_with('.') || matches!(name, "out" | "target" | "node_modules")
 }
+
+/// Files that mark a project's root directory, whose `build/` is its output.
+const BUILD_FILES: &[&str] = &[
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "pom.xml",
+];
 
 /// For the tests that guard against quadratic (or worse) blow-ups: how cost grows with input
 /// size, measured so that a loaded machine doesn't fail them. A fixed limit in seconds did:

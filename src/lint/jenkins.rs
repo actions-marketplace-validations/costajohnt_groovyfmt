@@ -207,8 +207,7 @@ fn head<'a>(n: Node, src: &'a str) -> &'a str {
 
 pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let named =
-        name == "Jenkinsfile" || name.starts_with("Jenkinsfile.") || name.ends_with(".jenkinsfile");
+    let named = crate::is_jenkinsfile(name);
     let mut c = root.walk();
     let mut top = root.named_children(&mut c).filter(|n| {
         !n.kind().contains("comment")
