@@ -5,6 +5,7 @@
 ### Fixed
 
 - Pipelines named `Jenkinsfile_*` and `Jenkinsfile-*` (`Jenkinsfile_k8s`, `Jenkinsfile-release`) are Jenkinsfiles, like `Jenkinsfile.*`: taken when named on the command line, found by a directory walk when they parse as Groovy (one ending in `~` or with a suffix such as `.md` or `.bak` isn't read), and checked by the Jenkinsfile lint rules. The pre-commit hooks take them when the rest of the name has no dot or `~`, and the VS Code extension and JetBrains plugin cover them. (#91)
+- The grammar pin moves to tree-sitter-groovy 3f33f0f. A command call's one name argument may continue on a later line that starts with `.`, `?.` or `*.`, as Groovy 2.4, 3 and 4 read it: `tasks.x.mustRunAfter tasks` then `.y` is `tasks.x.mustRunAfter(tasks.y)`, where the file used to be skipped ([#90](https://github.com/costajohnt/groovyfmt/issues/90)). The unqualified `foo bar` then `.baz`, which parsed as two statements, is the same command call now. A name argument that ends its statement stays one, so `a.b key` then `-1` or `++i` are still two statements. On the 23,793-file corpus nothing changes (85 skipped, same output).
 
 ## 0.15.0 (2026-11-14)
 
