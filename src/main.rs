@@ -20,11 +20,13 @@ groovyfmt: formatter and linter for Groovy, Gradle build scripts, and Jenkinsfil
 Usage: groovyfmt [OPTIONS] [PATH]...
 
 PATHs are files or directories (default: the current directory). Directories are
-searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, Jenkinsfile.*,
-Jenkinsfile_* and Jenkinsfile-* (if it parses) and *.jenkinsfile, skipping
-hidden directories, out, target, node_modules, build (except a package named
-build under a src directory within its project), and anything matching the config file's `exclude` patterns (which
-also apply to files named here).
+searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, *.jenkinsfile,
+Jenkinsfile.*, Jenkinsfile_*, Jenkinsfile-*, *-Jenkinsfile, *_Jenkinsfile and
+*.jenkins (those if they parse), and extensionless scripts whose first line is
+a groovy #! line, skipping hidden directories, out, target, node_modules, build
+(except a package named build under a src directory within its project), and
+anything matching the config file's `exclude` patterns (which also apply to
+files named here).
 Each file uses the nearest .groovyfmt.toml / groovyfmt.toml in its directory or
 above it; a nested config replaces its parent's, nothing is merged.
 
@@ -67,7 +69,8 @@ Options:
       --force              Read every file named here as Groovy, whatever its name
                            (by default one that isn't *.groovy, *.gradle, *.gvy, *.gy,
                            *.gsh, Jenkinsfile, Jenkinsfile.*, Jenkinsfile_*,
-                           Jenkinsfile-*, *.jenkinsfile or a groovy #! script is
+                           Jenkinsfile-*, *-Jenkinsfile, *_Jenkinsfile,
+                           *.jenkinsfile, *.jenkins or a groovy #! script is
                            skipped)
       --diff               With --check, or --lint --fix: print a unified diff of the
                            changes (for git apply / patch -p1) and write nothing
@@ -557,7 +560,7 @@ static FORCE: AtomicBool = AtomicBool::new(false);
 
 /// Whether a file is Groovy by its name or first line: a name a directory walk takes
 /// (`is_groovy_file`), any pipeline name (`is_jenkinsfile`, even `Jenkinsfile.md` or `Jenkinsfile_k8s.md`), or a script whose
-/// shebang runs groovy. Only files named on the command line can fail this; a Makefile or
+/// shebang runs groovy (`is_groovy_shebang`). Only files named on the command line can fail this; a Makefile or
 /// YAML file there (`groovyfmt *`) would parse as labels and lose its indentation.
 fn is_groovy(path: &Path, bytes: &[u8]) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -567,10 +570,9 @@ fn is_groovy(path: &Path, bytes: &[u8]) -> bool {
     } else {
         name
     };
-    let first = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
     groovyfmt::is_groovy_file(Path::new(name))
         || groovyfmt::is_jenkinsfile(name)
-        || (first.starts_with(b"#!") && first.windows(6).any(|w| w == b"groovy"))
+        || groovyfmt::is_groovy_shebang(bytes)
 }
 
 /// File contents, or `Ok(Err(reason))` for a file that is skipped rather than failing the

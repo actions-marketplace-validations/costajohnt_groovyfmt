@@ -118,8 +118,9 @@ pub fn printable(s: &str) -> String {
 /// Groovy sources, Gradle build scripts, and Jenkinsfiles: the names a directory walk takes.
 /// The same names the editor plugins treat as Groovy, except a backup (`Jenkinsfile~`) or a
 /// `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*` with a suffix that says it is something
-/// else (`Jenkinsfile.md`, `Jenkinsfile_k8s.j2`). A walk also reads those first
-/// (`is_walked_file`).
+/// else (`Jenkinsfile.md`, `Jenkinsfile_k8s.j2`). A walk also reads the pipeline names other
+/// than `Jenkinsfile` and `*.jenkinsfile` first, and takes an extensionless script by its
+/// shebang (`is_walked_file`).
 pub fn is_groovy_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     [".groovy", ".gradle", ".gvy", ".gy", ".gsh"]
@@ -139,17 +140,27 @@ pub fn is_groovy_file(path: &Path) -> bool {
 }
 
 /// Whether a directory walk takes the file at `path`: a name `is_groovy_file` takes, and for
-/// a `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*` not ending in `.groovy`, contents
-/// that parse as Groovy. Such a name may be a template or a note (`Jenkinsfile.disabled`,
-/// `Jenkinsfile_template`) that would
+/// a `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile` or
+/// `*.jenkins` not ending in `.groovy`, contents that parse as Groovy. Such a name may be a
+/// template or a note (`Jenkinsfile.disabled`, `Jenkinsfile_template`) that would
 /// only fail the run; one that doesn't parse is left out without a word, as a `.txt` file is.
+/// Any other file with no extension (and not ending in `~`) is taken when its first line is a
+/// groovy shebang (`is_groovy_shebang`); only its first 256 bytes are read, and files with
+/// other extensions are never opened.
 /// A file named on the command line is not read here, and is taken whatever it holds.
 pub fn is_walked_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !is_groovy_file(path) {
-        return false;
+        return Path::new(name).extension().is_none()
+            && !name.ends_with('~')
+            && has_groovy_shebang(path);
     }
-    if jenkinsfile_suffix(name).is_none() || name.ends_with(".groovy") {
+    let parse_gated = (jenkinsfile_suffix(name).is_some()
+        || name.ends_with("-Jenkinsfile")
+        || name.ends_with("_Jenkinsfile")
+        || ends_with_ignore_case(name, ".jenkins"))
+        && !name.ends_with(".groovy");
+    if !parse_gated {
         return true;
     }
     // too large or not UTF-8 is reported when it is read again, as for any other file
@@ -161,6 +172,32 @@ pub fn is_walked_file(path: &Path) -> bool {
         Ok(Ok(src)) => !parse(&src).root_node().has_error(),
         _ => true,
     }
+}
+
+/// Whether the first line of the file at `path` is a groovy shebang, reading at most 256 bytes.
+fn has_groovy_shebang(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(path).is_ok_and(|f| f.take(256).read_to_end(&mut head).is_ok())
+        && is_groovy_shebang(&head)
+}
+
+/// Whether `src` starts with a shebang line that runs groovy: `#!groovy`, `#!/usr/bin/groovy`,
+/// `#!/usr/bin/env groovy`, with or without arguments (`#!/usr/bin/env -S groovy -cp lib`).
+/// A first line that isn't UTF-8 (a binary) isn't one.
+pub fn is_groovy_shebang(src: &[u8]) -> bool {
+    let line = src.split(|&b| b == b'\n').next().unwrap_or_default();
+    let Some(Ok(rest)) = line.strip_prefix(b"#!").map(std::str::from_utf8) else {
+        return false;
+    };
+    let program = |w: &str, name: &str| w.rsplit('/').next() == Some(name);
+    let mut words = rest.split_whitespace();
+    let mut first = words.next();
+    if first.is_some_and(|w| program(w, "env")) {
+        // `env` options and `NAME=value` assignments come before the program
+        first = words.find(|w| !w.starts_with('-') && !w.contains('='));
+    }
+    first.is_some_and(|w| program(w, "groovy"))
 }
 
 /// Suffixes of `Jenkinsfile.*` (and `Jenkinsfile_*.*`, `Jenkinsfile-*.*`) names that a directory walk leaves alone without reading them:
@@ -203,15 +240,22 @@ const NOT_GROOVY: &[&str] = &[
 ];
 
 /// A pipeline by its name: `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`
-/// (`Jenkinsfile_k8s`) or `*.jenkinsfile` (any case: `ci/release.Jenkinsfile`).
+/// (`Jenkinsfile_k8s`), `*-Jenkinsfile`, `*_Jenkinsfile` (`rstan-Jenkinsfile`), `*.jenkinsfile`
+/// or `*.jenkins` (those two in any case: `ci/release.Jenkinsfile`).
 pub fn is_jenkinsfile(name: &str) -> bool {
     name == "Jenkinsfile"
         || jenkinsfile_suffix(name).is_some()
-        || name
-            .len()
-            .checked_sub(".jenkinsfile".len())
-            .and_then(|i| name.get(i..))
-            .is_some_and(|ext| ext.eq_ignore_ascii_case(".jenkinsfile"))
+        || name.ends_with("-Jenkinsfile")
+        || name.ends_with("_Jenkinsfile")
+        || ends_with_ignore_case(name, ".jenkinsfile")
+        || ends_with_ignore_case(name, ".jenkins")
+}
+
+fn ends_with_ignore_case(name: &str, end: &str) -> bool {
+    name.len()
+        .checked_sub(end.len())
+        .and_then(|i| name.get(i..))
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(end))
 }
 
 /// What follows `Jenkinsfile` in `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*`,

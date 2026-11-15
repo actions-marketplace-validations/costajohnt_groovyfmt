@@ -2009,6 +2009,70 @@ fn a_walk_takes_a_jenkinsfile_with_a_suffix_only_when_it_parses() {
 }
 
 #[test]
+fn name_jenkinsfile_and_jenkins_names_are_pipelines() {
+    let d = Dir::new("namejenkinsfile");
+    d.write("jenkins/rstan-Jenkinsfile", UGLY);
+    d.write("ci_Jenkinsfile", UGLY);
+    d.write("test/a.jenkins", &format!("#!groovy\n{UGLY}"));
+    d.write("test/b.jenkins", UGLY);
+    // unparseable: left out of a walk without a word
+    let template = "pipeline {\n{% for s in stages %}\n  stage('{{ s }}') { }\n{% endfor %}\n}\n";
+    d.write("x-Jenkinsfile", template);
+    d.write("test/c.jenkins", template);
+    // a backup is never read, so not even its shebang counts
+    d.write("x-Jenkinsfile~", &format!("#!groovy\n{UGLY}"));
+    let o = run(&d.0, &["--check", "."], None);
+    assert_eq!(
+        stdout(&o),
+        "ci_Jenkinsfile\njenkins/rstan-Jenkinsfile\ntest/a.jenkins\ntest/b.jenkins\n"
+    );
+    let o = run(&d.0, &["--syntax", "."], None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    // named on the command line, taken whatever it holds
+    let o = run(&d.0, &["--syntax", "x-Jenkinsfile"], None);
+    assert_ne!(o.status.code(), Some(0));
+    // the Jenkins rules apply to them
+    for f in ["foo-Jenkinsfile", "foo.jenkins"] {
+        d.write(f, "def x = 1\npipeline {\n    stages {}\n}\n");
+        let o = run(&d.0, &["--lint", f], None);
+        assert!(
+            stdout(&o).contains("JenkinsMissingSection"),
+            "{f}: {}",
+            stdout(&o)
+        );
+    }
+}
+
+#[test]
+fn a_walk_takes_extensionless_groovy_scripts_by_shebang() {
+    let d = Dir::new("shebang");
+    d.write("bin/a", &format!("#!groovy\n{UGLY}"));
+    d.write("bin/b", &format!("#!/usr/bin/env groovy\n{UGLY}"));
+    d.write("bin/c", &format!("#!/usr/bin/groovy -cp lib\r\n{UGLY}"));
+    d.write(
+        "bin/d",
+        &format!("#!/usr/bin/env -S groovy -cp lib\n{UGLY}"),
+    );
+    // not groovy, has an extension, or is a backup: left alone
+    d.write("bin/sh", &format!("#!/bin/sh\n{UGLY}"));
+    d.write(
+        "bin/groovysh-ish",
+        &format!("#!/usr/bin/env groovyish\n{UGLY}"),
+    );
+    d.write("bin/tool.sh", &format!("#!/usr/bin/env groovy\n{UGLY}"));
+    d.write("bin/a~", &format!("#!groovy\n{UGLY}"));
+    d.write("bin/plain", UGLY);
+    std::fs::write(d.0.join("bin/blob"), b"#!\xff\xfe groovy\0\x01\x02").unwrap();
+    let o = run(&d.0, &["--check", "."], None);
+    assert_eq!(stdout(&o), "bin/a\nbin/b\nbin/c\nbin/d\n");
+    // named on the command line: its first line decides, not its name
+    let o = run(&d.0, &["--check", "bin/tool.sh", "bin/sh"], None);
+    assert_eq!(stdout(&o), "bin/tool.sh\n", "{}", stderr(&o));
+    let o = run(&d.0, &["-v", "--check", "bin/sh"], None);
+    assert!(stderr(&o).contains("not a Groovy file"), "{}", stderr(&o));
+}
+
+#[test]
 fn jenkinsfile_underscore_and_dash_names_are_pipelines() {
     let d = Dir::new("jfunderscore");
     for f in ["Jenkinsfile_k8s", "Jenkinsfile-release"] {
