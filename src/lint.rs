@@ -1140,7 +1140,8 @@ fn works(c: Option<Node>) -> bool {
 /// `for (int i = 0; i < n; i += 1) {}` is still empty.
 fn update_works(n: Node) -> bool {
     let mut works = false;
-    if let Some(u) = n.child_by_field_name("update") {
+    // Groovy 3 takes several updates: `i++, it.next()`.
+    for u in n.children_by_field_name("update", &mut n.walk()) {
         crate::preorder(u, |x| {
             works |= x.kind() == "method_invocation"
                 || (x.kind() == "assignment_expression"
@@ -1536,13 +1537,14 @@ mod tests {
     #[test]
     fn empty_for_counting_on_locals_is_flagged() {
         // an update that only counts is no work; one that reads a field or calls walks
-        let src = "for (int i = 0; i < n; i += 1) { }\nfor (i = 0; i < n; i = i + 1) { }\nfor (int i = n; i > 0; i -= 2) { }\nfor (n = head; n.next != null; n = n.next) {}\nfor (; n; n = n[0]) { }\nfor (; i < n; i = step(i)) { }\n";
+        let src = "for (int i = 0; i < n; i += 1) { }\nfor (i = 0; i < n; i = i + 1) { }\nfor (int i = n; i > 0; i -= 2) { }\nfor (n = head; n.next != null; n = n.next) {}\nfor (; n; n = n[0]) { }\nfor (; i < n; i = step(i)) { }\nfor (; i < n; i++, j++) { }\nfor (; i < n; i++, it.next()) { }\n";
         assert_eq!(
             rules(src),
             vec![
                 ("EmptyForStatement", 1),
                 ("EmptyForStatement", 2),
                 ("EmptyForStatement", 3),
+                ("EmptyForStatement", 7),
             ]
         );
         // a parenthesized literal is a literal; a call in a range's bounds only sizes it

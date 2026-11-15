@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The grammar pin moves to tree-sitter-groovy f24c54c. Newly accepted, as Groovy reads them: declarations and loops in a GString `${ }` body (`"${ def v = 1; v }"`, `"${ for (i in x) {} }"`, `while`, `try`, and `do` in Groovy 3 and 4; the body is left as written, [#99](https://github.com/costajohnt/groovyfmt/issues/99)); an annotation after a modifier (`static @Field x = 1`, `private static @Field String y`, `final @Deprecated x = 1` in a method, `static @Deprecated f() {}` in a class, [#100](https://github.com/costajohnt/groovyfmt/issues/100)); a comment on the line after a `\` line continuation, which stays where it is ([#101](https://github.com/costajohnt/groovyfmt/issues/101)); comma-separated initializers and updates in a classic `for` (`for (i = 0, j = 0; i < n; i++, j++)`, Groovy 3 and 4, [#102](https://github.com/costajohnt/groovyfmt/issues/102)); `in` as a variable name in a typed declaration and an assignment that starts a line (`InputStream in = null`, `in = f()`, Groovy 3 and 4; `a in b`, `!in` and `for (x in y)` are as before, [#103](https://github.com/costajohnt/groovyfmt/issues/103)); and an empty subscript on a string (`"x"[]`, `command "x" []`, [#104](https://github.com/costajohnt/groovyfmt/issues/104)).
+- EmptyForStatement looks at every update of a classic `for`, so `for (; i < n; i++, it.next()) {}` walks an iterator and isn't flagged.
+
 ## 0.15.2 (2026-11-14)
 
 0.15.1 was tagged but never published: a JetBrains plugin test raced LSP4IJ and failed the release build. 0.15.2 is the same code with that test fixed.
