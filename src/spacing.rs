@@ -509,6 +509,8 @@ struct Row<'s> {
     line: usize,
     /// its indent, as written
     pad: String,
+    /// the source offset of its text
+    pos: usize,
     /// the text before each of its gaps, and after the last
     segs: Vec<&'s str>,
     /// `segs` in characters
@@ -667,13 +669,25 @@ fn text_of(row: &Row, gs: &[Gap], info: &[GapInfo], src: &str, widths: &[usize])
 /// state alone, and the next sweep reproduces it and stops: there are at most two sweeps per
 /// state change. In practice two to four sweeps settle a file; if `MAX_SWEEPS` don't, the
 /// file is skipped rather than written half-respaced.
+///
+/// A tab between tokens reaches the next multiple of `tab` columns of its line as written, so
+/// `a\t\t+ b` is as wide as it looks in an editor with that tab width, not two columns.
 pub(crate) fn respace(
     src: &str,
     tree: &Tree,
     lines: &mut [(String, &str)],
     bodies: &[Option<(usize, usize)>],
+    tab: usize,
 ) -> bool {
-    respace_capped(src, tree, lines, bodies, MAX_SWEEPS)
+    respace_capped(src, tree, lines, bodies, tab, MAX_SWEEPS)
+}
+
+/// Columns `s` takes from column `col`, a tab reaching the next multiple of `tab`.
+fn width_at(s: &str, col: usize, tab: usize) -> usize {
+    s.chars().fold(
+        col,
+        |c, ch| if ch == '\t' { c + tab - c % tab } else { c + 1 },
+    ) - col
 }
 
 fn respace_capped(
@@ -681,6 +695,7 @@ fn respace_capped(
     tree: &Tree,
     lines: &mut [(String, &str)],
     bodies: &[Option<(usize, usize)>],
+    tab: usize,
     max_sweeps: usize,
 ) -> bool {
     let gaps = gaps(src, tree);
@@ -724,6 +739,7 @@ fn respace_capped(
             rows.push(Row {
                 line: i,
                 pad: lines[i].0[..pad].to_string(),
+                pos,
                 seg_cols: segs.iter().map(|s| s.chars().count()).collect(),
                 segs,
                 gaps: first..g,
@@ -731,17 +747,30 @@ fn respace_capped(
         }
     }
     let original: Vec<String> = rows.iter().map(|r| lines[r.line].0.clone()).collect();
+    // each gap's width in columns, a tab reaching the next tab stop of the line as written,
+    // before it was re-indented (a kept tab gap counts as written, a column per character, as
+    // the sweeps see it)
     let source: Vec<Vec<usize>> = rows
         .iter()
         .map(|r| {
+            let start = src[..r.pos].rfind('\n').map_or(0, |i| i + 1);
+            let mut col = width_at(&src[start..r.pos], 0, tab);
             gaps[r.gaps.clone()]
                 .iter()
-                .map(|x| x.end - x.start)
+                .zip(&info[r.gaps.clone()])
+                .zip(&r.segs)
+                .map(|((x, i), seg)| {
+                    col += width_at(seg, col, tab);
+                    let gap = &src[x.start..x.end];
+                    let w = width_at(gap, col, tab);
+                    col += w;
+                    if i.tab { gap.len() } else { w }
+                })
                 .collect()
         })
         .collect();
-    // any other tab between tokens becomes a space, column for column, before the sweeps, so
-    // they see a run of spaces as wide as it was (a lone tab is already one space wide)
+    // any other tab between tokens becomes spaces to its tab stop before the sweeps, so they
+    // see a run as wide as it looked
     for (k, r) in rows.iter().enumerate() {
         let (gs, inf) = (&gaps[r.gaps.clone()], &info[r.gaps.clone()]);
         if gs
@@ -1239,6 +1268,35 @@ mod tests {
     }
 
     #[test]
+    fn tabs_reach_tab_stops() {
+        // two tabs after `a` and one after `aa` only look alike a column per tab
+        check(&[("x = a\t\t+ b\ny = aa\t+ bb", "x = a + b\ny = aa + bb")]);
+        // tabs that line up at a tab stop are alignment, kept as spaces
+        check(&[("a\t= 1\nbbbbb\t= 2", "a       = 1\nbbbbb   = 2")]);
+        // tab stops are those of the line as written, before it is re-indented
+        check(&[(
+            "class A {\n\tdef foo\t= 1\n\tdef b\t\t= 2 // x\n\tdef c =\t3\t// y\n}",
+            "class A {\n    def foo = 1\n    def b = 2 // x\n    def c = 3\t// y\n}",
+        )]);
+        // with `use_tabs`, a tab is `indent` columns wide
+        let tabs = Style {
+            use_tabs: true,
+            ..on()
+        };
+        for (src, want) in [
+            ("x = a\t\t+ b\ny = aa\t+ bb\n", "x = a + b\ny = aa + bb\n"),
+            ("a\t= 1\nbbb\t= 2\n", "a   = 1\nbbb = 2\n"),
+        ] {
+            let out = match format(src, &tabs) {
+                Outcome::Formatted(o) => o,
+                o => panic!("{src:?}: {o:?}"),
+            };
+            assert_eq!(out, want, "{src:?}");
+            assert_eq!(format(&out, &tabs), Outcome::Unchanged, "{out:?}");
+        }
+    }
+
+    #[test]
     fn spock_tables_with_tabs_are_untouched() {
         let src = "def 'f'() {\n    expect:\n    f(a)\n    where:\n    a\t|\tb\n    1\t|\t2\n}\n";
         assert_eq!(fmt(src), src);
@@ -1251,9 +1309,11 @@ mod tests {
         let tree = crate::parse(src);
         let mut lines = vec![("f(a,b)".to_string(), "\n")];
         let bodies = [Some((0, 0))];
-        assert!(!super::respace_capped(src, &tree, &mut lines, &bodies, 1));
+        assert!(!super::respace_capped(
+            src, &tree, &mut lines, &bodies, 8, 1
+        ));
         assert_eq!(lines[0].0, "f(a,b)");
-        assert!(super::respace_capped(src, &tree, &mut lines, &bodies, 2));
+        assert!(super::respace_capped(src, &tree, &mut lines, &bodies, 8, 2));
         assert_eq!(lines[0].0, "f(a, b)");
     }
 
