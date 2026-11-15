@@ -364,23 +364,37 @@ pub(crate) mod scaling {
     pub fn assert_scales_up_to(
         what: &str,
         f: impl Fn(usize),
-        mut n: usize,
+        n: usize,
         max: usize,
         k: usize,
         bound: u32,
     ) {
+        scales_up_to(what, &f, n, max, k, bound, cost);
+    }
+
+    /// `assert_scales_up_to` with the measurement passed in, so the self-tests below can
+    /// count work instead of timing it.
+    fn scales_up_to<F: Fn(usize)>(
+        what: &str,
+        f: &F,
+        mut n: usize,
+        max: usize,
+        k: usize,
+        bound: u32,
+        cost: impl Fn(&F, usize, usize) -> Duration,
+    ) {
         assert!(n * k <= max, "{what}: {k} x {n} is over the limit {max}");
-        while n * k * 2 <= max && cost(&f, n, 1) < MIN_COST {
+        while n * k * 2 <= max && cost(f, n, 1) < MIN_COST {
             n *= 2;
         }
         let mut reps = 1;
-        while cost(&f, n, reps) < MIN_COST {
+        while cost(f, n, reps) < MIN_COST {
             reps *= 2;
         }
         let mut seen = (Duration::ZERO, Duration::ZERO);
         for _ in 0..2 {
-            let small = cost(&f, n, reps);
-            let big = cost(&f, n * k, reps);
+            let small = cost(f, n, reps);
+            let big = cost(f, n * k, reps);
             if big <= small * bound {
                 return;
             }
@@ -419,8 +433,14 @@ pub(crate) mod scaling {
     #[test]
     #[should_panic(expected = "over 8x")]
     fn quadratic_work_at_a_hard_limit_fails() {
-        // can't grow: the repeated calls still show 16x
-        assert_scales_up_to("quadratic, capped", quadratic, 8, 32, 4, 8);
+        // can't grow: the repeated calls still show 16x. Counted, not timed: the harness
+        // takes the first measurement under the bound, so a single noisy one (seen on macOS
+        // CI) let real 16x work pass. One unit per iteration of `quadratic`.
+        let work = |_: &fn(usize), n: usize, reps: usize| {
+            Duration::from_nanos((n as u64 * 10).pow(2) * reps as u64)
+        };
+        let f: fn(usize) = quadratic;
+        scales_up_to("quadratic, capped", &f, 8, 32, 4, 8, work);
     }
 }
 
