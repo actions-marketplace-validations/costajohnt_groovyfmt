@@ -439,7 +439,8 @@ pub(crate) mod scaling {
         let work = |_: &fn(usize), n: usize, reps: usize| {
             Duration::from_nanos((n as u64 * 10).pow(2) * reps as u64)
         };
-        scales_up_to("quadratic, capped", &(quadratic as fn(usize)), 8, 32, 4, 8, work);
+        let f: fn(usize) = quadratic;
+        scales_up_to("quadratic, capped", &f, 8, 32, 4, 8, work);
     }
 }
 
