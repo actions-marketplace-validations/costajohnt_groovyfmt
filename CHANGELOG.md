@@ -2,12 +2,6 @@
 
 ## Unreleased
 
-### Fixed
-
-- The grammar pin moves to tree-sitter-groovy 7be76f7. Newly accepted, as Groovy reads them: a comparison or other expression as a Groovy 4 switch arrow case label (`case a < b -> 3`, `case c > d -> 4`); the name before `->` was read as a lambda's parameter ([#131](https://github.com/costajohnt/groovyfmt/issues/131)). `case FOO ->`, `case String ->`, `case List<String> ->`, `case 1 ->` and `case APRIL, MAY ->` are as before. A Hubitat `#include namespace.Library` line at column 0 is read as a comment and kept as written, so drivers and apps that use Hubitat libraries are formatted and linted instead of skipped ([#115](https://github.com/costajohnt/groovyfmt/issues/115)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): several `#!` lines opening a script (nix-shell style).
-
-## 0.17.0 (2026-11-15)
-
 ### Added
 
 - A directory walk takes a file with no extension whose first line is a `#!` that runs groovy (`#!groovy`, `#!/usr/bin/groovy`, `#!/usr/bin/env groovy`, with or without arguments). Only the first 256 bytes of an extensionless file are read for this, and files with other extensions or ending in `~` aren't opened. Named on the command line, a file is taken by the same shebang check, which now looks at the interpreter rather than for `groovy` anywhere in the line. Such a script is Groovy, not a pipeline: the Jenkinsfile lint rules check it only when `pipeline { }` is its first statement. ([#116](https://github.com/costajohnt/groovyfmt/issues/116))
@@ -15,6 +9,13 @@
 ### Fixed
 
 - Pipelines named `<name>-Jenkinsfile`, `<name>_Jenkinsfile` (`jenkins/rstan-Jenkinsfile`, [#134](https://github.com/costajohnt/groovyfmt/issues/134)) and `*.jenkins` (any case, [#116](https://github.com/costajohnt/groovyfmt/issues/116)) are Jenkinsfiles, like `Jenkinsfile_*`: taken when named on the command line, found by a directory walk when they parse as Groovy, and checked by the Jenkinsfile lint rules. The pre-commit hooks, the VS Code extension and the JetBrains plugin cover them.
+- The grammar pin moves to tree-sitter-groovy 7be76f7. Newly accepted, as Groovy reads them: a comparison or other expression as a Groovy 4 switch arrow case label (`case a < b -> 3`, `case c > d -> 4`); the name before `->` was read as a lambda's parameter ([#131](https://github.com/costajohnt/groovyfmt/issues/131)). `case FOO ->`, `case String ->`, `case List<String> ->`, `case 1 ->` and `case APRIL, MAY ->` are as before. A Hubitat `#include namespace.Library` line at column 0 is read as a comment and kept as written, so drivers and apps that use Hubitat libraries are formatted and linted instead of skipped ([#115](https://github.com/costajohnt/groovyfmt/issues/115)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): several `#!` lines opening a script (nix-shell style).
+
+## 0.17.0 (2026-11-15)
+
+### Fixed
+
+- With `normalize_spacing`, a map or argument list whose first entry is on the line of its `[` or `(` is no longer left half aligned when re-indenting moves the later keys out of the first key's column: no key in it keeps padding before its `:` then (`foo([projectId: 1,` over `    description: 3])`). When the first key still lines up, the keys stay aligned. ([#123](https://github.com/costajohnt/groovyfmt/issues/123))
 - The grammar pin moves to tree-sitter-groovy 7734e05. Newly accepted, as Groovy reads them: a generic type as a switch case label (`case List<String>:`, `case Map<String, Integer>:` in Groovy 3 and 4, `case List<String> -> 1` in Groovy 4, [#126](https://github.com/costajohnt/groovyfmt/issues/126)); `final (a, b) = [1, 2]`, also after a Spock label (Groovy 3 and 4, [#127](https://github.com/costajohnt/groovyfmt/issues/127)); record component defaults (`record R(boolean a, boolean b = false) {}`, Groovy 4, [#128](https://github.com/costajohnt/groovyfmt/issues/128)); and a string-headed command call with several arguments (`"foo" p, 2`, `"${op}" p, 2`, [#129](https://github.com/costajohnt/groovyfmt/issues/129)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): a script method whose only modifier is an annotation (`@CompileStatic foo(Integer id = 0) {}`) and closure varargs with a default or after `def` (`{ long... z = 123 -> z }`, `{ @A final def String... z -> z }`). On the 23,794-file corpus nothing changes (85 skipped, same output).
 - The grammar pin moves to tree-sitter-groovy 58db493. A method with annotations, modifiers and a return type after another member and a comment (`def x = 1`, `// doc`, `@Deprecated private boolean isLeaf() { }`) parses as a method, in a class and in a script. It was read as a field named after its return type and a constructor, so UnusedPrivateField reported `boolean` and UnusedPrivateMethod never saw the method. `@Field static final int N = 1` after a comment in a script is one typed declaration, not `int` and then `N = 1`. ([#122](https://github.com/costajohnt/groovyfmt/issues/122)) On the 23,794-file corpus nothing changes (85 skipped, same output).
 
@@ -23,7 +24,6 @@
 ### Fixed
 
 - The grammar pin moves to tree-sitter-groovy 0c4a05f. Newly accepted, as Groovy reads them: an `else` after an `if` whose body is a command chain (`if (a) or (b) or (c) {` then `} else {`, `if (a) foo b bar c` then `else {}`, [#109](https://github.com/costajohnt/groovyfmt/issues/109)); an annotation after `def` (`def @Shared String x` in a class, `def @Deprecated x = 1` in a method, [#110](https://github.com/costajohnt/groovyfmt/issues/110)); a classic `for` declaration without a value (`for (int i; i < 3; i++)`, [#111](https://github.com/costajohnt/groovyfmt/issues/111)); `default` and `case` as named-argument keys after another argument of a call without parentheses (`input name: "x", default: false`, [#112](https://github.com/costajohnt/groovyfmt/issues/112)); and Groovy 4 switch arrow cases with a name, type or several labels (`case FOO -> 1`, `case String -> {}`, `case APRIL, MAY -> ...`, `default -> 2`, [#113](https://github.com/costajohnt/groovyfmt/issues/113)). Also from [#114](https://github.com/costajohnt/groovyfmt/issues/114): a Groovy 4 colon case with several labels (`case 6, 9: yield "a"`), a `for` with an empty `;` body, an annotated for-in variable (`for (@Deprecated String s in l)`) and an annotated `def (a, b) = ...`. The one-line `case 1: foo default: bar`, which Groovy reads as `foo(default: bar)`, now parses that way too. On the 23,794-file corpus nothing changes (85 skipped, same output).
-- With `normalize_spacing`, a map or argument list whose first entry is on the line of its `[` or `(` is no longer left half aligned when re-indenting moves the later keys out of the first key's column: no key in it keeps padding before its `:` then (`foo([projectId: 1,` over `    description: 3])`). When the first key still lines up, the keys stay aligned. ([#123](https://github.com/costajohnt/groovyfmt/issues/123))
 
 ## 0.16.0 (2026-11-15)
 
