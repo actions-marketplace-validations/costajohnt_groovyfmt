@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Pipelines named `Jenkinsfile_*` and `Jenkinsfile-*` (`Jenkinsfile_k8s`, `Jenkinsfile-release`) are Jenkinsfiles, like `Jenkinsfile.*`: taken when named on the command line, found by a directory walk when they parse as Groovy (one ending in `~` or with a suffix such as `.md` or `.bak` isn't read), and checked by the Jenkinsfile lint rules. The pre-commit hooks take them when the rest of the name has no dot or `~`, and the VS Code extension and JetBrains plugin cover them. (#91)
+
 ## 0.15.0 (2026-11-14)
 
 ### Fixed

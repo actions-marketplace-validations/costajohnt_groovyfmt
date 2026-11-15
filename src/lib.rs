@@ -117,8 +117,9 @@ pub fn printable(s: &str) -> String {
 
 /// Groovy sources, Gradle build scripts, and Jenkinsfiles: the names a directory walk takes.
 /// The same names the editor plugins treat as Groovy, except a backup (`Jenkinsfile~`) or a
-/// `Jenkinsfile.*` with a suffix that says it is something else (`Jenkinsfile.md`,
-/// `Jenkinsfile.j2`). A walk also reads a `Jenkinsfile.*` first (`is_walked_file`).
+/// `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*` with a suffix that says it is something
+/// else (`Jenkinsfile.md`, `Jenkinsfile_k8s.j2`). A walk also reads those first
+/// (`is_walked_file`).
 pub fn is_groovy_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     [".groovy", ".gradle", ".gvy", ".gy", ".gsh"]
@@ -126,7 +127,7 @@ pub fn is_groovy_file(path: &Path) -> bool {
         .any(|ext| name.ends_with(ext))
         || (is_jenkinsfile(name)
             && !name.ends_with('~')
-            && !name.strip_prefix("Jenkinsfile.").is_some_and(|ext| {
+            && !jenkinsfile_suffix(name).is_some_and(|ext| {
                 NOT_GROOVY.contains(
                     &ext.rsplit('.')
                         .next()
@@ -138,8 +139,9 @@ pub fn is_groovy_file(path: &Path) -> bool {
 }
 
 /// Whether a directory walk takes the file at `path`: a name `is_groovy_file` takes, and for
-/// a `Jenkinsfile.*` other than `Jenkinsfile.groovy`, contents that parse as Groovy. Such a
-/// name may be a template or a note (`Jenkinsfile.disabled`, `Jenkinsfile.tmpl`) that would
+/// a `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*` not ending in `.groovy`, contents
+/// that parse as Groovy. Such a name may be a template or a note (`Jenkinsfile.disabled`,
+/// `Jenkinsfile_template`) that would
 /// only fail the run; one that doesn't parse is left out without a word, as a `.txt` file is.
 /// A file named on the command line is not read here, and is taken whatever it holds.
 pub fn is_walked_file(path: &Path) -> bool {
@@ -147,7 +149,7 @@ pub fn is_walked_file(path: &Path) -> bool {
     if !is_groovy_file(path) {
         return false;
     }
-    if !name.starts_with("Jenkinsfile.") || name.ends_with(".groovy") {
+    if jenkinsfile_suffix(name).is_none() || name.ends_with(".groovy") {
         return true;
     }
     // too large or not UTF-8 is reported when it is read again, as for any other file
@@ -161,7 +163,7 @@ pub fn is_walked_file(path: &Path) -> bool {
     }
 }
 
-/// Suffixes of `Jenkinsfile.*` names that a directory walk leaves alone without reading them:
+/// Suffixes of `Jenkinsfile.*` (and `Jenkinsfile_*.*`, `Jenkinsfile-*.*`) names that a directory walk leaves alone without reading them:
 /// docs, data, templates, patches and backup copies, which would not survive being formatted
 /// as Groovy.
 const NOT_GROOVY: &[&str] = &[
@@ -200,16 +202,23 @@ const NOT_GROOVY: &[&str] = &[
     "log",
 ];
 
-/// A pipeline by its name: `Jenkinsfile`, `Jenkinsfile.*` or `*.jenkinsfile` (any case:
-/// `ci/release.Jenkinsfile`).
+/// A pipeline by its name: `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`
+/// (`Jenkinsfile_k8s`) or `*.jenkinsfile` (any case: `ci/release.Jenkinsfile`).
 pub fn is_jenkinsfile(name: &str) -> bool {
     name == "Jenkinsfile"
-        || name.starts_with("Jenkinsfile.")
+        || jenkinsfile_suffix(name).is_some()
         || name
             .len()
             .checked_sub(".jenkinsfile".len())
             .and_then(|i| name.get(i..))
             .is_some_and(|ext| ext.eq_ignore_ascii_case(".jenkinsfile"))
+}
+
+/// What follows `Jenkinsfile` in `Jenkinsfile.*`, `Jenkinsfile_*` or `Jenkinsfile-*`,
+/// separator included (`.release`, `_k8s`).
+fn jenkinsfile_suffix(name: &str) -> Option<&str> {
+    name.strip_prefix("Jenkinsfile")
+        .filter(|rest| rest.starts_with(['.', '_', '-']))
 }
 
 /// Directories skipped while walking: hidden ones and common build/vendor output.

@@ -28,6 +28,8 @@ const SELECTOR: DocumentSelector = [
   '**/*.jenkinsfile',
   '**/Jenkinsfile',
   '**/Jenkinsfile.*',
+  '**/Jenkinsfile_*',
+  '**/Jenkinsfile-*',
 ].map((pattern) => ({ scheme: 'file', pattern }));
 
 const DECLINED = 'groovyfmt.downloadDeclined';

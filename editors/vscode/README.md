@@ -6,7 +6,7 @@ Formats and lints Groovy, Gradle build scripts and Jenkinsfiles with [groovyfmt]
 - parse errors and lint violations as you type
 - a quick fix for each fixable violation, and "Fix all auto-fixable problems" (`source.fixAll.groovyfmt`)
 
-It covers `*.groovy`, `*.gvy`, `*.gy`, `*.gsh`, `*.gradle`, `*.jenkinsfile`, `Jenkinsfile` and `Jenkinsfile.*`. It has no syntax highlighting, completion or navigation of its own. VS Code's built-in Groovy support or another Groovy, Gradle or Jenkins extension provides those, and this extension works alongside them, whatever language id they give these files.
+It covers `*.groovy`, `*.gvy`, `*.gy`, `*.gsh`, `*.gradle`, `*.jenkinsfile`, `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*` and `Jenkinsfile-*`. It has no syntax highlighting, completion or navigation of its own. VS Code's built-in Groovy support or another Groovy, Gradle or Jenkins extension provides those, and this extension works alongside them, whatever language id they give these files.
 
 ## Install
 

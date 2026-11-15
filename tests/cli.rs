@@ -1986,6 +1986,44 @@ fn a_walk_takes_a_jenkinsfile_with_a_suffix_only_when_it_parses() {
 }
 
 #[test]
+fn jenkinsfile_underscore_and_dash_names_are_pipelines() {
+    let d = Dir::new("jfunderscore");
+    for f in ["Jenkinsfile_k8s", "Jenkinsfile-release"] {
+        d.write(f, UGLY);
+    }
+    // parses, but a backup or a suffix that says it's something else is never read
+    for f in [
+        "Jenkinsfile_k8s~",
+        "Jenkinsfile_x.md",
+        "Jenkinsfile-old.bak",
+    ] {
+        d.write(f, UGLY);
+    }
+    let template = "pipeline {\n{% for s in stages %}\n  stage('{{ s }}') { }\n{% endfor %}\n}\n";
+    d.write("Jenkinsfile_template", template);
+    let o = run(&d.0, &["--check", "."], None);
+    assert_eq!(stdout(&o), "Jenkinsfile-release\nJenkinsfile_k8s\n");
+    let o = run(&d.0, &["--syntax", "."], None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    // named on the command line, it is taken whatever it holds
+    let o = run(&d.0, &["--syntax", "Jenkinsfile_template"], None);
+    assert_ne!(o.status.code(), Some(0));
+    let o = run(&d.0, &["--check", "Jenkinsfile_x.md"], None);
+    assert_eq!(stdout(&o), "Jenkinsfile_x.md\n");
+    // the Jenkins rules apply to them
+    d.write(
+        "Jenkinsfile_ci",
+        "def x = 1\npipeline {\n    stages {}\n}\n",
+    );
+    let o = run(&d.0, &["--lint", "Jenkinsfile_ci"], None);
+    assert!(
+        stdout(&o).contains("JenkinsMissingSection"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+#[test]
 fn discovers_pipelines_named_like_the_editors_do() {
     let d = Dir::new("pipelines");
     for f in [
