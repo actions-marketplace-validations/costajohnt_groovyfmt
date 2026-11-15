@@ -289,7 +289,8 @@ fn groovy24_empty_elements_are_kept_as_written_and_linted() {
 
     let l = run(&d.0, &["--lint"], None);
     assert_eq!(l.status.code(), Some(1));
-    let found: Vec<&str> = stdout(&l)
+    let text = stdout(&l);
+    let found: Vec<&str> = text
         .lines()
         .filter(|s| s.contains("Groovy24EmptyElement"))
         .map(|s| s.split(": ").next().unwrap_or(""))
@@ -303,10 +304,9 @@ fn groovy24_empty_elements_are_kept_as_written_and_linted() {
             "Driver.groovy:5:19",
             "Driver.groovy:6:41"
         ],
-        "{}",
-        stdout(&l)
+        "{text}"
     );
-    assert!(stdout(&l).contains("Driver.groovy:2:11: Groovy24EmptyElement: An empty argument"));
+    assert!(text.contains("Driver.groovy:2:11: Groovy24EmptyElement: An empty argument"));
     d.write(".groovyfmt.toml", "[lint]\nGroovy24EmptyElement = false\n");
     assert!(!stdout(&run(&d.0, &["--lint"], None)).contains("Groovy24EmptyElement"));
     let e = run(&d.0, &["--explain", "Groovy24EmptyElement"], None);
