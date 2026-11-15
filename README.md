@@ -112,7 +112,7 @@ GitHub Actions:
 
 ```yaml
 - uses: actions/checkout@v5
-- uses: costajohnt/groovyfmt@v0.17.0      # runs groovyfmt --check --output-format github
+- uses: costajohnt/groovyfmt@v0.18.0      # runs groovyfmt --check --output-format github
 - run: groovyfmt --lint --output-format github
 ```
 
@@ -121,7 +121,7 @@ pre-commit:
 ```yaml
 repos:
   - repo: https://github.com/costajohnt/groovyfmt
-    rev: v0.17.0
+    rev: v0.18.0
     hooks:
       - id: groovyfmt        # format in place; or groovyfmt-check to only report
       - id: groovyfmt-lint
