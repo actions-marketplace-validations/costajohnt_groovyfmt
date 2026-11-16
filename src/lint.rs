@@ -166,7 +166,7 @@ pub const RULES: &[Rule] = &[
         why: "A double-quoted string without `$` reads as if something were interpolated; a single-quoted String says it isn't.",
         bad: "def stage = \"build\"",
         good: "def stage = 'build'",
-        fixable: false,
+        fixable: true,
     },
     // Suppressions (src/lint/suppress.rs)
     Rule {
@@ -475,7 +475,7 @@ pub const RULES: &[Rule] = &[
         why: "Groovy 2.4 (Hubitat, SmartThings) ignores the extra comma, so it does nothing there, and Groovy 3 and later refuse to compile the file. Removing it changes nothing on 2.4 and makes the code portable.",
         bad: "def modes = [\"off\", \"cool\", , \"heat\"]\nsetModes(modes,, true)",
         good: "def modes = [\"off\", \"cool\", \"heat\"]\nsetModes(modes, true)",
-        fixable: false,
+        fixable: true,
     },
     // Unused code (src/lint/unused.rs)
     Rule {
@@ -1101,15 +1101,26 @@ fn dollar_names<'a>(t: &'a str, used: &mut HashSet<&'a str>) {
     }
 }
 
-/// UnnecessaryGString: double-quoted string with nothing to interpolate.
+/// UnnecessaryGString: double-quoted string with nothing to interpolate. Groovy compiles one
+/// to the same String constant as its single-quoted form, which the fix writes: the same
+/// escapes mean the same in both. Not fixed with a `\u` escape, which Groovy reads before
+/// the quotes (`"\u0027"` would end a single-quoted string).
 fn unnecessary_gstring(src: &str, n: Node, v: &mut Vec<Violation>) {
     let t = text(n, src);
     if t.starts_with('"') && !has_interpolation(n) && !t.contains('\'') && !t.contains('$') {
-        v.push(at(
-            n,
-            "UnnecessaryGString",
-            format!("The String {t} can be wrapped in single quotes instead of double quotes"),
-        ));
+        let q = if t.starts_with("\"\"\"") { 3 } else { 1 };
+        let fix = (!t.contains("\\u") && t.len() >= 2 * q).then(|| Edit {
+            range: n.byte_range(),
+            with: format!("{0}{1}{0}", "'".repeat(q), &t[q..t.len() - q]),
+        });
+        v.push(Violation {
+            fix,
+            ..at(
+                n,
+                "UnnecessaryGString",
+                format!("The String {t} can be wrapped in single quotes instead of double quotes"),
+            )
+        });
     }
 }
 

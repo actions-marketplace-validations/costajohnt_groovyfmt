@@ -28,13 +28,13 @@ Turn a rule on or off in the `[lint]` table of [`.groovyfmt.toml`](configuration
 | DuplicateCaseStatement | on | two `case` labels for the same constant (`'a'` and `"a"` count as the same) |
 | AssignmentInConditional | on | `if (x = 1)`, where `==` was probably meant; `while (x = next())` is a common idiom and is exempt, and so is an assignment in extra parentheses, `if ((m = re.matcher(s)))` |
 | ConstantIfExpression | on | an `if` whose condition is a literal, so one branch never runs |
-| UnnecessaryGString | off | a double-quoted string with nothing to interpolate (noisy where double quotes are the house style) |
+| UnnecessaryGString | off | a double-quoted string with nothing to interpolate (noisy where double quotes are the house style). Fixable |
 | UnusedSuppression | off | a `groovyfmt-ignore` comment that suppresses nothing (or names no rule), or a CodeNarc comment or `@SuppressWarnings` naming a groovyfmt rule it doesn't suppress ([suppressing reports](#suppressing-reports)) |
 | ComparisonWithSelf | off | a variable compared with itself (Spock equality checks do this on purpose); not inside a GORM where query (`Book.where { title == title }`, `@Where`), where the left side is the domain property |
 | DoubleNegative | off | `!!x` or `!(!x)` (`!!x` is a common way to turn a value into a boolean) |
 | ForLoopShouldBeWhileLoop | off | `for (; condition;)`, a `for` loop with only a condition (a style preference) |
 | ClassNameSameAsFilename | off | a file whose only top-level code is one class, interface, enum, trait or annotation type, named other than the file less its `.groovy` (a naming convention); a file with any other top-level code is a script and isn't checked |
-| Groovy24EmptyElement | on | an empty argument, list element or map entry, `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`: Groovy 2.4 (Hubitat, SmartThings) drops it, and Groovy 3 and later reject the file. It is on by default because the extra comma never does anything, so removing it is safe on every version. The formatter keeps it as written |
+| Groovy24EmptyElement | on | an empty argument, list element or map entry, `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`: Groovy 2.4 (Hubitat, SmartThings) drops it, and Groovy 3 and later reject the file. It is on by default because the extra comma never does anything, so removing it is safe on every version. The formatter keeps it as written. Fixable |
 
 A block holding only a comment doesn't count as empty.
 
@@ -193,6 +193,8 @@ These apply in classes whose superclass is `Specification` or ends in `Spec` or 
 
 - an `UnusedImport`, `DuplicateImport` or `ImportFromSamePackage` line is removed, with its line break, and only when nothing but whitespace or a `;` shares the line
 - an `UnnecessarySemicolon` `;` is removed
+- `Groovy24EmptyElement`: the extra comma is removed, with the whitespace back to the comma before it, `foo(a,,b)` becoming `foo(a,b)` (only the comma when a comment is between them). Groovy 2.4 drops the empty element, so the call, list or map is the one 2.4 already compiled, and Groovy 3 and later now accept it
+- `UnnecessaryGString` (when turned on): `"text"` becomes `'text'` and `"""text"""` becomes `'''text'''`, the content kept as written. Groovy compiles both to the same String, and its escapes (`\t`, `\"`, a line-ending `\`) mean the same in either. A string holding a `\u` escape is only reported, since Groovy reads `\u0027` as a quote before it reads the string
 - `GradleRemovedConfiguration`: `testCompile` becomes `testImplementation`, `runtime` becomes `runtimeOnly` and `testRuntime` becomes `testRuntimeOnly`. `compile` becomes `implementation` for most builds but `api` for a dependency a library's own API exposes, which only the build's author knows, so it is fixed only when the config's `[lint]` table names the replacement: `gradle_compile_replacement = "implementation"` (or `"api"`). Without it the report stays, and its message says so. A rename is fixed only in a file that applies a Java plugin (`java`, `java-library`, `groovy`, `scala`, `application`, `war`, `java-gradle-plugin`, Kotlin JVM, Ratpack's `io.ratpack.ratpack-java` and `-groovy`, or Android's `com.android.application`, `.library`, `.dynamic-feature` and `.test`, by `apply plugin:` or in `plugins { }`), which makes the new configurations; a file whose plugins come from a parent's `allprojects` or a convention plugin is only reported, and the message says why. `compile` becomes `api` only in a file that applies `java-library` or `com.android.library`
 - `GradleJcenter`: a plain `jcenter()` line in a `repositories { }` block becomes `mavenCentral()`, or is removed when the block already has a plain `mavenCentral()`. `jcenter { ... }` is left as it is
 - `GradleLeftShiftTask`: `task name << { ... }` becomes `task name { doLast { ... } }`, the action kept as written (`task 'name' << { }` is left as it is, as is one with a comment between `<<` and `{` or a line break in it)

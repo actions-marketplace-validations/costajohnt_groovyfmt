@@ -1,6 +1,7 @@
 //! `--lint --fix`: apply the edits of the violations that have one (`Violation::fix`):
-//! delete what UnusedImport, DuplicateImport, ImportFromSamePackage and
-//! UnnecessarySemicolon flag, and rewrite what the fixable Gradle rules flag. Then prove the
+//! delete what UnusedImport, DuplicateImport, ImportFromSamePackage, UnnecessarySemicolon
+//! and Groovy24EmptyElement flag, single-quote what UnnecessaryGString flags, and rewrite
+//! what the fixable Gradle rules flag. Then prove the
 //! result safe, as `format` does its output. The fixed text must parse cleanly; its tokens
 //! outside the edited ranges must be the input's outside them; its parse tree outside them
 //! must have the input's shape (so a removed `;` can't join two statements, or make a
@@ -379,6 +380,51 @@ mod tests {
         );
         // the `;` between the two imports is not at a line end
         assert_eq!(fixed(src), Fix::Nothing);
+    }
+
+    #[test]
+    fn removes_groovy24_empty_elements() {
+        let src = "foo(a,,b)\ndef l = ['off', , 'heat']\ndef m = [a: 1,, b: 2]\nfoo(a,,, b)\nfoo(a, /* x */ , b)\nfoo(a,\n  ,\n  b)\n";
+        assert_eq!(
+            text(src),
+            "foo(a,b)\ndef l = ['off', 'heat']\ndef m = [a: 1, b: 2]\nfoo(a, b)\nfoo(a, /* x */  b)\nfoo(a,\n  b)\n"
+        );
+        assert_eq!(fixed(&text(src)), Fix::Nothing, "idempotent");
+        // a single trailing comma is not an empty element
+        for src in ["foo(a, b)\n", "def l = [a, b,]\n"] {
+            assert_eq!(fixed(src), Fix::Nothing, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn single_quotes_a_string_with_nothing_to_interpolate() {
+        let src = r#"def a = "x"
+def b = """line
+"quoted""""
+def c = "tab\t\"q\""
+def d = ""
+"#;
+        assert_eq!(
+            text(src),
+            r#"def a = 'x'
+def b = '''line
+"quoted"'''
+def c = 'tab\t\"q\"'
+def d = ''
+"#
+        );
+        assert_eq!(fixed(&text(src)), Fix::Nothing, "idempotent");
+        // something to interpolate, a quote, or a `\u` escape (read before the quotes)
+        for src in [
+            r#"def a = "$x""#,
+            r#"def a = "${x}""#,
+            r#"def a = "it's""#,
+            r#"def a = "\$x""#,
+            r#"def a = "'""#,
+            "def a = 'x'",
+        ] {
+            assert_eq!(fixed(src), Fix::Nothing, "{src:?}");
+        }
     }
 
     #[test]

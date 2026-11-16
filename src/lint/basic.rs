@@ -110,7 +110,7 @@ pub(super) fn check(src: &str, nodes: &[Node], v: &mut Vec<Violation>) {
             }
             "object_creation_expression" => big_decimal(src, n, v),
             "unary_expression" => double_negative(src, n, v),
-            "argument_list" | "list_literal" | "map_literal" => empty_element(n, v),
+            "argument_list" | "list_literal" | "map_literal" => empty_element(src, n, v),
             "synchronized_statement" if is_empty_block(n.child_by_field_name("body")) => {
                 v.push(at(
                     n,
@@ -1177,26 +1177,39 @@ fn double_negative(src: &str, n: Node, v: &mut Vec<Violation>) {
 }
 
 /// Groovy24EmptyElement: `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`, reported at each comma
-/// that follows another one.
-fn empty_element(n: Node, v: &mut Vec<Violation>) {
+/// that follows another one. The fix removes that comma, with the whitespace before it back
+/// to the other comma (only the comma when a comment is between): Groovy 2.4 drops the empty
+/// element, so the call, list or map is the same without it.
+fn empty_element(src: &str, n: Node, v: &mut Vec<Violation>) {
     let what = match n.kind() {
         "argument_list" => "argument",
         "list_literal" => "list element",
         _ => "map entry",
     };
-    let mut after_comma = false;
+    let mut comma: Option<Node> = None;
     for k in n.children(&mut n.walk()) {
         if k.kind().contains("comment") {
             continue;
         }
-        if k.kind() == "," && after_comma {
-            v.push(at(
-                k,
-                "Groovy24EmptyElement",
-                format!("An empty {what}: Groovy 2.4 drops it and Groovy 3 and later reject it; remove the extra comma"),
-            ));
+        if let Some(c) = comma.filter(|_| k.kind() == ",") {
+            let start = if src[c.end_byte()..k.start_byte()].trim().is_empty() {
+                c.end_byte()
+            } else {
+                k.start_byte()
+            };
+            v.push(Violation {
+                fix: Some(super::Edit {
+                    range: start..k.end_byte(),
+                    with: String::new(),
+                }),
+                ..at(
+                    k,
+                    "Groovy24EmptyElement",
+                    format!("An empty {what}: Groovy 2.4 drops it and Groovy 3 and later reject it; remove the extra comma"),
+                )
+            });
         }
-        after_comma = k.kind() == ",";
+        comma = (k.kind() == ",").then_some(k);
     }
 }
 
