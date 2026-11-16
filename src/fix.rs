@@ -315,13 +315,7 @@ fn import_symbols<'a>(src: &'a str, root: Node, range: &Range<usize>) -> Vec<&'a
             return true;
         }
         if range.start <= n.start_byte() && n.end_byte() <= range.end {
-            let name = n
-                .child_by_field_name("name")
-                .map_or("", |x| crate::text(x, src));
-            v.push(n.child_by_field_name("alias").map_or_else(
-                || name.rsplit('.').next().unwrap_or(name),
-                |a| crate::text(a, src),
-            ));
+            v.push(crate::lint::import_name(n, src).1);
         }
         false
     });
@@ -442,6 +436,23 @@ mod tests {
         // a mention in a string is not a use
         assert_eq!(text("import a.Foo\nprintln 'a Foo'\n"), "println 'a Foo'\n");
         assert_eq!(text("import a.Foo\nprintln 'Foo'\n"), "println 'Foo'\n");
+        // #171: used, however spaced around the dots; unused ones still go
+        for import in [
+            "import java.util.concurrent. TimeUnit",
+            "import java.util.concurrent . TimeUnit",
+            "import java.util.concurrent.\n    TimeUnit",
+            "import java.util.concurrent.\tTimeUnit",
+        ] {
+            let src = format!("{import}\nTimeUnit t = TimeUnit.SECONDS\n");
+            assert_eq!(fixed(&src), Fix::Nothing, "{src:?}");
+        }
+        let src = "import static java.util.concurrent.TimeUnit. SECONDS\nprintln SECONDS\n";
+        assert_eq!(fixed(src), Fix::Nothing);
+        assert_eq!(text("import a. Foo\nx()\n"), "x()\n");
+        assert_eq!(
+            text("import a. Foo\nimport a.Foo\nFoo f\n"),
+            "import a. Foo\nFoo f\n"
+        );
     }
 
     #[test]
@@ -481,6 +492,15 @@ mod tests {
             ),
             ("import a.Foo\nprintln \"$Foo\"\n", "import a.Foo"),
             ("import a.Foo\ndef x = (Foo) y\n", "import a.Foo"),
+            // #171: the name as Groovy reads it, without the spaces around its dots
+            ("import a. Foo\nFoo f = null\n", "import a. Foo"),
+            ("import a .Foo\nFoo f = null\n", "import a .Foo"),
+            ("import a.\n  Foo\nFoo f = null\n", "import a.\n  Foo"),
+            ("import a./*c*/Foo\nFoo f = null\n", "import a./*c*/Foo"),
+            (
+                "import static a.B. SECONDS\nprintln SECONDS\n",
+                "import static a.B. SECONDS",
+            ),
         ] {
             assert_eq!(net(src, line), gone, "{src:?}");
         }
