@@ -235,14 +235,15 @@ pub(super) fn check(
         let body = match n.kind() {
             "method_declaration" | "constructor_declaration"
                 if (n.kind() == "method_declaration" || is_method(src, n))
-                    && n
-                        .child_by_field_name("return_type")
+                    && n.child_by_field_name("return_type")
                         .is_none_or(|t| text(t, src) != "void") =>
             {
                 n.child_by_field_name("body")
             }
             "closure" => Some(n),
-            "lambda_expression" => n.child_by_field_name("body").filter(|b| b.kind() == "block"),
+            "lambda_expression" => n
+                .child_by_field_name("body")
+                .filter(|b| b.kind() == "block"),
             _ => None,
         };
         returned.extend(body.and_then(last_statement));
@@ -598,7 +599,10 @@ mod tests {
         );
         // a use before the declaration is another variable
         assert_eq!(
-            rules("def f(x) {\n  g(x)\n  def y = 1\n  g()\n}\n", "UnusedVariable"),
+            rules(
+                "def f(x) {\n  g(x)\n  def y = 1\n  g()\n}\n",
+                "UnusedVariable"
+            ),
             vec![3]
         );
         // a script's top-level variables and annotated ones (`@Field`) are left alone, and
