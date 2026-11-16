@@ -582,7 +582,7 @@ mod tests {
         // names with `$` (groovy ValidNameTest)
         assert_eq!(
             rules(
-                "def f() {\n  def $foo$foo = 1\n  def a$b = 2\n  g($foo$foo + a$b)\n  def $c = 3\n}\n",
+                "def f() {\n  def $foo$foo = 1\n  def a$b = 2\n  g($foo$foo + a$b)\n  def $c = 3\n  g()\n}\n",
                 "UnusedVariable"
             ),
             vec![5]
@@ -598,14 +598,14 @@ mod tests {
         );
         // a use before the declaration is another variable
         assert_eq!(
-            rules("def f(x) {\n  g(x)\n  def y = 1\n}\n", "UnusedVariable"),
+            rules("def f(x) {\n  g(x)\n  def y = 1\n  g()\n}\n", "UnusedVariable"),
             vec![3]
         );
         // a script's top-level variables and annotated ones (`@Field`) are left alone, and
         // a suppression is a suppression
         assert_eq!(
             rules(
-                "def x = 1\n@Field def y = 1\ndef f() {\n  @SuppressWarnings('UnusedVariable') def z = 1\n}\n",
+                "def x = 1\n@Field def y = 1\ndef f() {\n  @SuppressWarnings('UnusedVariable') def z = 1\n  g()\n}\n",
                 "UnusedVariable"
             ),
             vec![] as Vec<usize>
