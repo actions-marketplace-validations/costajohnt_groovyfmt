@@ -1082,14 +1082,16 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
     // Hubitat appends an `#include`d library to the file, and the library uses the file's
     // imports, so in such a file none can be removed (#192)
     let include = hubitat_include(src, tree.root_node());
-    let full_of = |d: Node| {
-        let name = import_name(d, src).0;
+    let mut seen = HashSet::new();
+    for d in decls.iter().copied() {
+        let (name, symbol) = import_name(d, src);
         let alias = d.child_by_field_name("alias").map(|a| text(a, src));
+        let star = import_has(d, ".*");
         // as Groovy reads it, so `import a.b. C` and `import a.b.C` are the same (#171); the
         // annotations as written
         let kw = d.children(&mut d.walk()).find(|k| k.kind() == "import");
         let annotations = kw.map_or("", |k| &src[d.start_byte()..k.start_byte()]);
-        format!(
+        let full = format!(
             "{}import {}{name}{}{}",
             annotations
                 .split_whitespace()
@@ -1100,16 +1102,9 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
             } else {
                 ""
             },
-            if import_has(d, ".*") { ".*" } else { "" },
+            if star { ".*" } else { "" },
             alias.map_or_else(String::new, |a| format!(" as {a}")),
-        )
-    };
-    let fulls: Vec<String> = decls.iter().map(|d| full_of(*d)).collect();
-    let mut seen = HashSet::new();
-    for (&d, full) in decls.iter().zip(&fulls) {
-        let (name, symbol) = import_name(d, src);
-        let alias = d.child_by_field_name("alias").map(|a| text(a, src));
-        let star = import_has(d, ".*");
+        );
         // `@Library('lib') import x` and `@Grab(...) import y` are there for the annotation:
         // never unused, and never removed
         let annotated = text(d, src).starts_with('@');
@@ -1151,8 +1146,8 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
     }
 }
 
-/// Whether another single-name import (not `.*`) than one the same as `d` brings in the
-/// simple name (or alias) `d` brings in, so which class the name means can hang on `d`.
+/// Whether an import other than a copy of `d`, and not a `.*` one, brings in the simple
+/// name (or alias) `d` does: then which class the name means hangs on their order.
 pub(crate) fn rebound(src: &str, decls: &[Node], d: Node) -> bool {
     let (name, symbol) = import_name(d, src);
     decls.iter().any(|&e| {
