@@ -664,28 +664,28 @@ pub const RULES: &[Rule] = &[
         name: "GradleRemovedConfiguration",
         default: true,
         description: "compile, runtime, testCompile or testRuntime dependencies (removed in Gradle 7.0), unless the Gradle wrapper pins an older Gradle",
-        why: "`compile`, `runtime`, `testCompile` and `testRuntime` were removed in Gradle 7.0; the build fails on a current Gradle.",
-        bad: "dependencies {\n    compile 'org.slf4j:slf4j-api:2.0.9'\n}",
-        good: "dependencies {\n    implementation 'org.slf4j:slf4j-api:2.0.9'\n}",
-        fixable: false,
+        why: "`compile`, `runtime`, `testCompile` and `testRuntime` were removed in Gradle 7.0; the build fails on a current Gradle. `--fix` renames `testCompile` to testImplementation, `runtime` to runtimeOnly and `testRuntime` to testRuntimeOnly. `compile` becomes implementation for most builds but api for a dependency a library's own API exposes, so `--fix` replaces it only with `gradle_compile_replacement = \"implementation\"` (or `\"api\"`) in the config's `[lint]` table. The new configurations come from the Java plugins, so a rename is fixed only in a file that applies one (java, java-library, groovy, scala, application, war, java-gradle-plugin or Kotlin JVM, with `apply plugin:` or in `plugins { }`); a file whose plugins come from elsewhere (a parent's allprojects, a convention plugin) is only reported, and the message says so. `api` comes only with the java-library plugin, so `compile` becomes api only in a file that applies it. Source: the Gradle upgrade guide for 6.x to 7.0, and the Java Library plugin chapter.",
+        bad: "plugins {\n    id 'java'\n}\ndependencies {\n    testCompile 'junit:junit:4.13.2'\n}",
+        good: "plugins {\n    id 'java'\n}\ndependencies {\n    testImplementation 'junit:junit:4.13.2'\n}",
+        fixable: true,
     },
     Rule {
         name: "GradleJcenter",
         default: true,
         description: "the jcenter() repository (removed in Gradle 9.0)",
-        why: "JCenter is read-only and `jcenter()` was removed in Gradle 9.0.",
+        why: "JCenter is read-only and `jcenter()` was removed in Gradle 9.0. `--fix` turns a plain `jcenter()` line in a repositories block into mavenCentral(), or removes it when the block already has mavenCentral(); `jcenter { ... }` is left to you. A dependency published only to JCenter still needs another home. Source: the Gradle upgrade guides for 6.x to 7.0 and 8.x to 9.0.",
         bad: "repositories {\n    jcenter()\n}",
         good: "repositories {\n    mavenCentral()\n}",
-        fixable: false,
+        fixable: true,
     },
     Rule {
         name: "GradleLeftShiftTask",
         default: true,
         description: "task name << { } (removed in Gradle 5.0)",
-        why: "`task name << { }` was removed in Gradle 5.0; the build fails on a current Gradle.",
+        why: "`task name << { }` was removed in Gradle 5.0; the build fails on a current Gradle. `--fix` writes `task name { doLast { ... } }`, keeping the action as written (`task 'name' << { }` is left to you). Source: the Gradle upgrade guide for 4.x to 5.0.",
         bad: "task hello << {\n    println 'hello'\n}",
-        good: "tasks.register('hello') {\n    doLast {\n        println 'hello'\n    }\n}",
-        fixable: false,
+        good: "task hello { doLast {\n    println 'hello'\n} }",
+        fixable: true,
     },
     Rule {
         name: "GradleDynamicVersion",
@@ -704,6 +704,33 @@ pub const RULES: &[Rule] = &[
         bad: "apply plugin: 'java'\n\njar {\n    classifier = 'all'\n}",
         good: "apply plugin: 'java'\n\njar {\n    archiveClassifier = 'all'\n}",
         fixable: false,
+    },
+    Rule {
+        name: "GradleSpaceAssignment",
+        default: true,
+        description: "`description 'x'`, `group 'x'` or `version 'x'` setting the project's property (at the top level or in allprojects, subprojects or project(':x')), or `description 'x'` or `group 'x'` in a task's block: Groovy DSL space assignment, deprecated in Gradle 8.12, unless the Gradle wrapper pins an older Gradle",
+        why: "Gradle 8.12 deprecated setting a property as `name value`, a method Gradle generates for each property, and Gradle 10 removes it: write `name = value`. Real methods keep working (`apply plugin: 'java'`, `id 'x' version '1'`, `implementation 'a:b:1'`), so only properties known to have no method of the name are reported, where the script's delegate is known: the project's `description`, `group` and `version`, and a task's `description` and `group`. `--fix` writes `name = value`. Source: the Gradle upgrade guide for 8.11 to 8.12 (\"Groovy space assignment syntax\").",
+        bad: "group 'org.example'\nversion '1.0'\n\ntask docs {\n    description 'Builds the docs'\n}",
+        good: "group = 'org.example'\nversion = '1.0'\n\ntask docs {\n    description = 'Builds the docs'\n}",
+        fixable: true,
+    },
+    Rule {
+        name: "GradleDependencyTuple",
+        default: false,
+        description: "a dependency in map notation, `implementation group: 'a', name: 'b', version: '1'`, with only group, name and version as plain strings (off by default: a style choice before Gradle 9.1)",
+        why: "The string `'a:b:1'` says the same in one place, and Gradle 9.1 deprecated the map (multi-string) notation, to be removed in Gradle 10. Not reported with other keys (`classifier`, `ext`, `configuration`, ...) or a value that isn't a plain string. `--fix` writes the string. Source: the Gradle upgrade guide for 9.0 to 9.1 (\"Deprecation of multi-string dependency notation\").",
+        bad: "dependencies {\n    implementation group: 'org.slf4j', name: 'slf4j-api', version: '2.0.9'\n}",
+        good: "dependencies {\n    implementation 'org.slf4j:slf4j-api:2.0.9'\n}",
+        fixable: true,
+    },
+    Rule {
+        name: "GradleDependencyParentheses",
+        default: false,
+        description: "a dependency in parentheses with no closure after it, `implementation('a:b:1')` (off by default: a style choice)",
+        why: "In the Groovy DSL `implementation 'a:b:1'` is the same call, and most build scripts write it that way. Not reported with a closure after it, over several lines, or when an argument would read differently without the parentheses. `--fix` removes them.",
+        bad: "dependencies {\n    implementation('org.slf4j:slf4j-api:2.0.9')\n}",
+        good: "dependencies {\n    implementation 'org.slf4j:slf4j-api:2.0.9'\n}",
+        fixable: true,
     },
     // Spock specifications (src/lint/spock.rs)
     Rule {
@@ -745,6 +772,7 @@ mod suppress;
 mod unused;
 
 pub use elsewhere::Projects;
+pub(crate) use gradle::{same_assignment, same_call};
 
 #[derive(Debug, PartialEq)]
 pub struct Violation {
@@ -755,9 +783,10 @@ pub struct Violation {
     pub end_col: usize,
     pub rule: &'static str,
     pub message: String,
-    /// The bytes `--fix` deletes to fix it, for the rules it fixes: the `;`, or the import's
-    /// whole lines when nothing else is on them.
-    pub fix: Option<std::ops::Range<usize>>,
+    /// What `--fix` does to fix it, for the rules it fixes: delete the `;`, or the import's
+    /// whole lines when nothing else is on them; replace a removed Gradle configuration's
+    /// name; rewrite a Gradle statement.
+    pub fix: Option<Edit>,
     /// The bytes of the flagged code, so `--fix` can tell a report that goes with a deleted
     /// line (an unused import that is also unnecessary) from one that changed.
     pub span: std::ops::Range<usize>,
@@ -766,8 +795,23 @@ pub struct Violation {
     pub owner: Option<String>,
 }
 
+/// `--fix`'s change for one violation: the bytes `range` become `with` (empty: deleted).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edit {
+    pub range: std::ops::Range<usize>,
+    pub with: String,
+}
+
 pub fn lint(src: &str) -> Result<Vec<Violation>, &'static str> {
     lint_file(Path::new(""), src)
+}
+
+/// Fixes that depend on the config: with `gradle_compile_replacement` set (`compile`),
+/// GradleRemovedConfiguration on a `compile` dependency replaces the name with it.
+pub fn opt_in_fixes(vs: &mut [Violation], src: &str, compile: Option<&str>) {
+    if let Some(with) = compile {
+        gradle::opt_in_compile(vs, src, with);
+    }
 }
 
 /// Lint `src` as the file at `path`, whose name decides the Jenkinsfile and Gradle rules.
@@ -925,14 +969,18 @@ fn at(n: Node, rule: &'static str, message: String) -> Violation {
 
 /// The lines holding `n`, with the line break after them, when nothing but whitespace and
 /// a `;` shares them.
-fn own_lines(src: &str, n: Node) -> Option<std::ops::Range<usize>> {
+fn own_lines(src: &str, n: Node) -> Option<Edit> {
     let start = src[..n.start_byte()].rfind('\n').map_or(0, |i| i + 1);
     let end = src[n.end_byte()..]
         .find('\n')
         .map_or(src.len(), |i| n.end_byte() + i + 1);
     let after = src[n.end_byte()..end].trim();
-    (src[start..n.start_byte()].trim().is_empty() && (after.is_empty() || after == ";"))
-        .then_some(start..end)
+    (src[start..n.start_byte()].trim().is_empty() && (after.is_empty() || after == ";")).then(
+        || Edit {
+            range: start..end,
+            with: String::new(),
+        },
+    )
 }
 
 /// UnusedImport + DuplicateImport.
@@ -1085,7 +1133,10 @@ fn unnecessary_semicolon(n: Node, rest: &[Node], v: &mut Vec<Violation>) {
         .find(|x| x.child_count() == 0 && !x.kind().contains("comment"));
     if next.is_none_or(|x| x.start_position().row > row && !matches!(x.kind(), "{" | "++" | "--")) {
         v.push(Violation {
-            fix: Some(n.byte_range()),
+            fix: Some(Edit {
+                range: n.byte_range(),
+                with: String::new(),
+            }),
             ..at(
                 n,
                 "UnnecessarySemicolon",
@@ -1619,8 +1670,7 @@ mod tests {
         let mut emitted: HashSet<&str> =
             lint(src).expect("parses").iter().map(|v| v.rule).collect();
         let jenkins = "pipeline {\n agent foo\n agent none\n def x = 1\n bogus { }\n options { parameters([]) }\n stages {\n  stage(\"${x}\") {\n   when { onBranch 'x' }\n   steps { if (x) { } }\n  }\n  stage('a') { }\n  stage('a') { steps { echo 1 } }\n }\n}\n";
-        let gradle =
-            "repositories { jcenter() }\ndependencies { compile 'a:b:+' }\ntask t << { }\n";
+        let gradle = "repositories { jcenter() }\ndependencies { compile 'a:b:+' }\ntask t << { }\nversion '1'\ndependencies {\n implementation('a:b:1')\n implementation group: 'a', name: 'b'\n}\n";
         let spock = "class S extends Specification {\n def f() {\n  when:\n  f()\n  then: 'x'\n  where:\n  a | b\n  2 | 3 | 4\n }\n def g() {\n  then:\n  x\n }\n}\n";
         let more = "package p\nimport p.Q\nimport java.util.Date\nclass K {\n private int pf\n private void m() { }\n static { }\n { }\n boolean equals(Object o) { true }\n int hashcode() { 1 }\n String toString() { null }\n}\nclass L {\n boolean equals(String s) { true }\n}\ndef g() {\n def u = 1\n return 1\n f()\n}\ntry { f() } finally { return 1; throw new E(); assert x }\nswitch (x) { }\ndef s = [1, 1] as Set\ndef t = true ? 1 : 2\nassert true\nif (1 == 2) { f() }\nif (x != null || x.a) { f() }\nif (x % 2 == 1) { f() }\nl.removeAll(l)\nthrow RuntimeException()\nvoid h() { try { f() } catch (e) { new BadException(e) } }\nDate d = new Q()\ndef bd = new BigDecimal(1.5)\nif (a | b) { f() }\ndef nn = !!x\nsynchronized (l) { }\nfor (; c;) { f() }\nInteger.getInteger('p')\ndef r = (int) Math.random()\ndef io = !x instanceof String\ndef m1 = y % 1\nf(a,,b)\n";
         for (name, src) in [
