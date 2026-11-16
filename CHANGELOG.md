@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The Jenkins lint rules check the declarative pipelines of shared library steps: a `pipeline { }` in a top-level `call` method of a `.groovy` file directly in a `vars` directory, directly in the method's body (after any other statements) or in an `if` branch there, with reports at its lines in the file. Before, only a Jenkinsfile or a file whose first statement is `pipeline { }` was checked, which missed most declarative pipelines in shared libraries. Jenkinsfiles are checked as before. On 922 step files in field-trial clones of shared libraries, all 32 pipelines in them (in 28 files, 14 of them in `if` branches) are now checked, with no reports.
+
 ## 0.19.0 (2026-11-15)
 
 ### Added
