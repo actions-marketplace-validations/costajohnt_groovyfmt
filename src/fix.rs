@@ -81,9 +81,9 @@ pub fn fix(
 }
 
 /// One round: the text with `todo`'s edits made, and the violations that fixes. An edit that
-/// fails the checks on its own is dropped (`dropped` gets why, the first time), and the rest
-/// are tried again; `None` when all are dropped. An error when the edits fail together but
-/// none alone.
+/// fails the checks on its own is dropped (`dropped` gets why, the first time; found by
+/// `bisect`), and the rest are tried again; `None` when all are dropped. An error when the
+/// edits fail together but none alone.
 fn round(
     path: &Path,
     text: &str,
@@ -113,10 +113,9 @@ fn round(
                 return Ok(Some((out, done)));
             }
             Err(why) => {
-                let bad: Vec<usize> = (0..es.len())
-                    .filter(|&k| attempt(&es[k..=k], &calls[k..=k]).is_err())
-                    .map(|k| made[k])
-                    .collect();
+                let mut bad = Vec::new();
+                bisect(&attempt, &es, &calls, 0, &mut bad);
+                let bad: Vec<usize> = bad.into_iter().map(|k| made[k]).collect();
                 if bad.is_empty() {
                     return Err(why);
                 }
@@ -130,6 +129,31 @@ fn round(
         }
     }
     Ok(None)
+}
+
+/// Given edits that fail the checks together, add to `bad` (offset by `at`) each that fails
+/// them alone: halves are checked and only failing ones split again, so k bad edits of n
+/// take O(k log n) checks, not n. A set failing while both its halves pass fails only in
+/// combination, and its edits are not dropped.
+// ponytail: an edit failing alone inside a passing half is kept; the round's final check
+// covers the whole set anyway, and a set left failing with none found refuses the file
+fn bisect<T>(
+    attempt: &impl Fn(&[Edit], &[&str]) -> Result<T, &'static str>,
+    es: &[Edit],
+    calls: &[&str],
+    at: usize,
+    bad: &mut Vec<usize>,
+) {
+    if es.len() == 1 {
+        bad.push(at);
+        return;
+    }
+    let mid = es.len() / 2;
+    for (lo, hi) in [(0, mid), (mid, es.len())] {
+        if attempt(&es[lo..hi], &calls[lo..hi]).is_err() {
+            bisect(attempt, &es[lo..hi], &calls[lo..hi], at + lo, bad);
+        }
+    }
 }
 
 /// The violations whose edits to make this round (sorted, none overlapping another), and
@@ -180,6 +204,12 @@ fn inside(n: Node, removed: &[Range<usize>]) -> bool {
         .any(|r| r.start <= n.start_byte() && n.end_byte() <= r.end)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Checks run on this thread, so a test can bound the work of a round.
+    static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// `calls` is each edit's rule, which says whether it rewrites a dependency statement
 /// (`CALL_REWRITES`) or turns a call into an assignment (`ASSIGNMENT_REWRITE`).
 #[allow(clippy::too_many_arguments)] // the two texts and the edits between them
@@ -194,6 +224,8 @@ fn check(
     compile: Option<&str>,
     auto: &impl Fn(&Violation) -> bool,
 ) -> Result<(), &'static str> {
+    #[cfg(test)]
+    CHECKS.with(|c| c.set(c.get() + 1));
     let removed: Vec<Range<usize>> = edits.iter().map(|e| e.range.clone()).collect();
     let (before, after) = (crate::parse(src), crate::parse(out));
     if after.root_node().has_error() {
@@ -714,6 +746,64 @@ def d = ''
         assert_eq!(
             dropped,
             Some("a rewritten dependency would parse as a different call")
+        );
+    }
+
+    #[test]
+    fn failing_fixes_among_many_are_found_in_few_checks() {
+        // 400 `;`s to remove, and two edits that break the parse, which fail alone: checking
+        // each edit alone took 402 checks of the whole file (#160)
+        let path = Path::new("A.groovy");
+        let src: String = (0..400).map(|i| format!("x{i} = {i};\n")).collect();
+        let mut todo: Vec<Violation> = lint_file(path, &src)
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.fix.is_some())
+            .collect();
+        assert_eq!(todo.len(), 400);
+        for line in [123, 321] {
+            let at = src.find(&format!("x{line} = ")).unwrap() + format!("x{line} = ").len();
+            let range = at..at + 3;
+            todo.push(Violation {
+                fix: Some(Edit {
+                    range: range.clone(),
+                    with: "(".into(),
+                }),
+                span: range,
+                ..lint_file(path, &src).unwrap().remove(0)
+            });
+        }
+        let mut dropped = None;
+        let all = |_: &Violation, _: &str| true;
+        CHECKS.with(|c| c.set(0));
+        let Ok(Some((out, done))) = round(path, &src, todo, &[], None, &all, &mut dropped) else {
+            panic!()
+        };
+        let checks = CHECKS.with(|c| c.get());
+        assert_eq!(out, src.replace(';', ""));
+        assert_eq!(done.len(), 400);
+        assert_eq!(dropped, Some("the fixed file would not parse"));
+        // the whole set, two halves per level down to each bad edit, then the rest: 36
+        assert!(checks <= 50, "{checks} checks");
+    }
+
+    #[test]
+    fn fixes_failing_only_together_refuse_the_file() {
+        // a double-quoted mention counts as a use of the import, a single-quoted one doesn't
+        let gstrings = |v: &Violation, _: &str| v.rule == "UnnecessaryGString";
+        let run = |src: &str| fix(Path::new("A.groovy"), src, None, gstrings);
+        // alone, the last mention's fix fails and is dropped, and the other is made
+        let Fix::Fixed(t, f) = run("import a.Foo\nx = \"Foo\"\ny = \"z\"\n") else {
+            panic!()
+        };
+        assert_eq!(
+            (t.as_str(), f.len()),
+            ("import a.Foo\nx = \"Foo\"\ny = 'z'\n", 1)
+        );
+        // with two, each passes alone but not both: nothing is written
+        assert_eq!(
+            run("import a.Foo\nx = \"Foo\"\nw = \"Foo\"\ny = \"z\"\n"),
+            Fix::Refused("other lint violations would change")
         );
     }
 }
