@@ -2001,6 +2001,37 @@ fn a_build_package_under_src_is_source_and_gradle_output_is_not() {
 }
 
 #[test]
+fn a_build_package_in_a_source_set_outside_src_is_source() {
+    // #173: a shared library keeps sources in `src`, `vars` and `test/groovy`, with no
+    // `src/test`; `build` packages there are source, Gradle's output beside them is not
+    let d = Dir::new("buildset");
+    d.write("build.gradle", "");
+    d.write("test/groovy/org/acme/build/T.groovy", UGLY);
+    d.write("integrationTest/groovy/org/acme/build/I.groovy", UGLY);
+    d.write("vars/build/V.groovy", UGLY);
+    d.write("build/tmp/G.groovy", UGLY);
+    d.write("sub/build/tmp/S.groovy", UGLY);
+    let o = run(&d.0, &["--check"], None);
+    assert_eq!(
+        stdout(&o),
+        "integrationTest/groovy/org/acme/build/I.groovy
+test/groovy/org/acme/build/T.groovy
+vars/build/V.groovy
+"
+    );
+    // a `vars` or `groovy` directory with a build file of its own is a project: its
+    // `build` is output
+    d.write("groovy/build.gradle", "");
+    d.write("groovy/build/G.groovy", UGLY);
+    let o = run(&d.0, &["--check"], None);
+    assert!(
+        !stdout(&o).contains("groovy/build/G.groovy"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+#[test]
 fn a_src_directory_above_the_project_does_not_make_its_output_source() {
     // a project kept under `src` (`~/src/proj`), whose subprojects have no build file of the
     // standard name: their output is still skipped

@@ -272,11 +272,13 @@ fn jenkinsfile_suffix(name: &str) -> Option<&str> {
 /// (`src/main/groovy/org/acme/build`) or a plain directory (`jobs/build/x/Jenkinsfile`). Its
 /// project is the nearest directory above it holding a Gradle or Maven build file
 /// (`BUILD_FILES`) or a `.git`. It is output, and skipped, only when that project has a build
-/// file and no directory named `src` lies between them. So `sub/build` is skipped even in a
-/// subproject with no build file of its own, `lib/src/main/groovy/build` is entered, a
-/// checkout kept under `~/src` doesn't count, and in a repository with a `.git` but no build
-/// file (a Jenkins job repository) `build` is an ordinary directory. Outside any project (no
-/// build file or `.git` above it), a `src` anywhere in its absolute path makes it a package.
+/// file and no source root (`SOURCE_ROOTS`: `src`, a Jenkins library's `vars`, a source set's
+/// `groovy`) lies between them. So `sub/build` is skipped even in a subproject with no build
+/// file of its own, `lib/src/main/groovy/build`, `test/groovy/org/acme/build` (a source set
+/// outside `src`) and `vars/build` are entered, a checkout kept under `~/src` doesn't count,
+/// and in a repository with a `.git` but no build file (a Jenkins job repository) `build` is
+/// an ordinary directory. Outside any project (no build file or `.git` above it), a source
+/// root anywhere in its absolute path makes it a package.
 /// The path is absolute so a walk started inside `src` (`cd src/main/groovy; groovyfmt .`)
 /// counts.
 pub fn is_skipped_dir(path: &Path) -> bool {
@@ -296,7 +298,9 @@ pub fn skipped_dir(path: &Path) -> Option<&'static str> {
                 output = build_file;
                 break;
             }
-            in_src |= a.file_name().is_some_and(|n| n == "src");
+            in_src |= a
+                .file_name()
+                .is_some_and(|n| SOURCE_ROOTS.iter().any(|r| n == *r));
         }
         return (output && !in_src).then_some("build output");
     }
@@ -310,6 +314,11 @@ pub fn skipped_dir(path: &Path) -> Option<&'static str> {
         None
     }
 }
+
+/// Directories whose `build` packages are source, not output: `src`, a Jenkins shared
+/// library's `vars`, and the language directory of a source set (`test/groovy`,
+/// `integrationTest/groovy`, `src/main/groovy`), where Gradle never writes its output (#173).
+const SOURCE_ROOTS: &[&str] = &["src", "vars", "groovy"];
 
 /// Files that mark a project's root directory, whose `build/` is its output.
 const BUILD_FILES: &[&str] = &[
