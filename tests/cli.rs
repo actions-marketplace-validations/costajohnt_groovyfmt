@@ -655,7 +655,7 @@ fn lint_fix_keeps_static_accessor_imports_used_as_properties() {
     );
     assert_eq!(
         stderr(&f),
-        "fixed 1 violations in 1 files (UnusedImport 1)\n"
+        "fixed 1 violations in 1 files (UnusedImport 1)\n0 violations in 1 files\n"
     );
 }
 
