@@ -10,8 +10,8 @@
 //! Only a declarative pipeline is checked: a top-level `pipeline { }` in a file named
 //! `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`,
 //! `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, or in any file whose first statement it is,
-//! and a `pipeline { }` directly in the body of a top-level `call` method of a shared library
-//! step (`vars/*.groovy`), after any other statements there.
+//! and a `pipeline { }` in a top-level `call` method of a shared library step
+//! (`vars/*.groovy`): directly in its body, after any other statements, or in an `if` branch.
 //! Scripted pipelines (`node { }`) are never checked.
 
 use super::{Violation, at, constant_value, has_interpolation};
@@ -225,21 +225,29 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     if named || !library_step(path) {
         return;
     }
-    // Only a pipeline directly in a top-level `call` method's body: one inside an `if` or a
-    // closure there may be one of several the step chooses between, and is left alone.
     let mut c = root.walk();
     for m in root.named_children(&mut c).filter(|m| {
         m.kind() == "method_declaration"
             && m.child_by_field_name("name")
                 .is_some_and(|n| text(n, src) == "call")
     }) {
-        let Some(body) = m.child_by_field_name("body") else {
-            continue;
-        };
-        let mut c = body.walk();
-        body.named_children(&mut c)
-            .filter(|n| n.kind() == "pipeline_statement")
-            .for_each(|p| pipeline(src, p, v));
+        if let Some(body) = m.child_by_field_name("body") {
+            step_pipelines(src, body, v);
+        }
+    }
+}
+
+/// The pipelines in a `call` method's body, directly or in the branches of an `if`, the way a
+/// step picks one of several (`if (type == 'web') { pipeline { } } else { pipeline { } }`).
+/// One in a closure, a loop or a `try` is left alone.
+fn step_pipelines(src: &str, n: Node, v: &mut Vec<Violation>) {
+    let mut c = n.walk();
+    for s in n.named_children(&mut c) {
+        match s.kind() {
+            "pipeline_statement" => pipeline(src, s, v),
+            "block" | "if_statement" => step_pipelines(src, s, v),
+            _ => {}
+        }
     }
 }
 
@@ -1218,6 +1226,17 @@ mod tests {
             "def call(body) {{\n def config = [:]\n body.resolveStrategy = Closure.DELEGATE_FIRST\n body.delegate = config\n body()\n{VALID}}}\n"
         );
         assert_eq!(jenkins("vars/build.groovy", &valid), vec![]);
+        // each branch of an `if` that picks a pipeline, not the condition
+        let branches = format!(
+            "def call(String type) {{\n if (type == 'a') {{\n {bad}\n }} else if ({{ -> pipeline {{ }} }}) {{\n {bad}\n }} else {{ {bad} }}\n}}\n"
+        );
+        assert_eq!(
+            jenkins("vars/build.groovy", &branches)
+                .iter()
+                .map(|r| r.1)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 7, 8, 10, 11]
+        );
         for (name, src) in [
             // not a step: not directly in vars, not .groovy
             ("src/build.groovy", step.clone()),
@@ -1231,11 +1250,15 @@ mod tests {
                 "vars/build.groovy",
                 "def call() {\n pipeline() { stages { } }\n}\n".into(),
             ),
-            // not `call`, not directly in its body
+            // not `call`; in a closure, loop or `try` in its body
             ("vars/build.groovy", format!("def run() {{ {bad} }}\n")),
             (
                 "vars/build.groovy",
-                format!("def call(c) {{\n if (c) {{ {bad} }}\n}}\n"),
+                format!("def call(c) {{\n for (x in c) {{ {bad} }}\n}}\n"),
+            ),
+            (
+                "vars/build.groovy",
+                format!("def call(c) {{\n try {{ {bad} }} finally {{ }}\n}}\n"),
             ),
             (
                 "vars/build.groovy",
