@@ -2,6 +2,10 @@
 
 The extension's version follows groovyfmt's: version X.Y.Z downloads groovyfmt X.Y.Z when it finds no groovyfmt installed. The groovyfmt changes are in its [changelog](https://github.com/costajohnt/groovyfmt/blob/main/CHANGELOG.md).
 
+## 0.19.0 (2026-11-15)
+
+- New icon.
+
 ## 0.18.0 (2026-11-15)
 
 - Pipelines named `<name>-Jenkinsfile`, `<name>_Jenkinsfile` and `*.jenkins` start groovyfmt too.
