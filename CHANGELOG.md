@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A closure's last parameter with a bare name as its default, `{ a, Map<String, String> m = h -> m }`, `{ String a = 'x', List<String> e = g -> e }`, parses, as Groovy 2.4, 3 and 4 read it: the `->` after the name is the closure's, not a lambda `h -> m` in the default. Files with one were skipped. In first position, `{ List<String> e = g -> e }` or `{ e = g -> e }`, it had parsed as a body declaring or assigning a lambda; it is now the parameter, so lint rules see the parameter and the body. Formatting of those is unchanged. A default that only ends in a name, `{ a, e = x + g -> e }`, is not covered yet. The grammar pin moves to tree-sitter-groovy 1e89f8f. ([#166](https://github.com/costajohnt/groovyfmt/issues/166))
+
 ## 0.20.1 (2026-11-16)
 
 ### Fixed
