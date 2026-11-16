@@ -649,7 +649,10 @@ fn lint_fix_keeps_static_accessor_imports_used_as_properties() {
     d.write("A.groovy", src);
     let f = run(&d.0, &["--lint", "--fix"], None);
     assert_eq!(f.status.code(), Some(0), "{}", stderr(&f));
-    assert_eq!(d.read("A.groovy"), src.replace("import static a.U.getGone\n", ""));
+    assert_eq!(
+        d.read("A.groovy"),
+        src.replace("import static a.U.getGone\n", "")
+    );
     assert_eq!(
         stderr(&f),
         "fixed 1 violations in 1 files (UnusedImport 1)\n"

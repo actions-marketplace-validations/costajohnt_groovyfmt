@@ -252,7 +252,11 @@ fn check(
         .filter(|(_, r)| **r == "UnusedImport")
         .flat_map(|(e, _)| import_symbols(src, b, &e.range))
         .collect();
-    if !gone.is_empty() && identifiers(out, a).iter().any(|t| gone.iter().any(|g| g == t)) {
+    if !gone.is_empty()
+        && identifiers(out, a)
+            .iter()
+            .any(|t| gone.iter().any(|g| g == t))
+    {
         return Err("a removed import's name is still used");
     }
     if leaves(src, &before, &removed) != leaves(out, &after, inserted) {
@@ -505,13 +509,34 @@ mod tests {
                 "import static a.B. SECONDS",
             ),
             // #181: a static accessor import's property, in each form Groovy reads
-            ("import static a.B.getSCOPES\nprintln SCOPES\n", "import static a.B.getSCOPES"),
-            ("import static a.B.getUrl\nprintln url\n", "import static a.B.getUrl"),
-            ("import static a.B.getUrl\nprintln Url\n", "import static a.B.getUrl"),
-            ("import static a.B.isACTIVE\nprintln ACTIVE\n", "import static a.B.isACTIVE"),
-            ("import static a.B.setURLX\nURLX = 1\n", "import static a.B.setURLX"),
-            ("import static a.B.get_foo\nprintln _foo\n", "import static a.B.get_foo"),
-            ("import static a.B.getFoo as getBar\nprintln bar\n", "import static a.B.getFoo as getBar"),
+            (
+                "import static a.B.getSCOPES\nprintln SCOPES\n",
+                "import static a.B.getSCOPES",
+            ),
+            (
+                "import static a.B.getUrl\nprintln url\n",
+                "import static a.B.getUrl",
+            ),
+            (
+                "import static a.B.getUrl\nprintln Url\n",
+                "import static a.B.getUrl",
+            ),
+            (
+                "import static a.B.isACTIVE\nprintln ACTIVE\n",
+                "import static a.B.isACTIVE",
+            ),
+            (
+                "import static a.B.setURLX\nURLX = 1\n",
+                "import static a.B.setURLX",
+            ),
+            (
+                "import static a.B.get_foo\nprintln _foo\n",
+                "import static a.B.get_foo",
+            ),
+            (
+                "import static a.B.getFoo as getBar\nprintln bar\n",
+                "import static a.B.getFoo as getBar",
+            ),
         ] {
             assert_eq!(net(src, line), gone, "{src:?}");
         }

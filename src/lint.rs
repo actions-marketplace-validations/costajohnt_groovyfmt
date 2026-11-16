@@ -1781,10 +1781,15 @@ mod tests {
         ] {
             let src = format!("import static a.U.{import}\nprintln {used}\n");
             assert_eq!(rules(&src), vec![], "{src:?}");
-            let src = format!("import static a.U.{import}\nclass W {{ def go() {{ id({used}) }} }}\n");
+            let src =
+                format!("import static a.U.{import}\nclass W {{ def go() {{ id({used}) }} }}\n");
             assert_eq!(rules(&src), vec![], "{src:?}");
         }
-        for (import, used) in [("setURLX", "URLX"), ("setName", "Name"), ("setUrlY", "urlY")] {
+        for (import, used) in [
+            ("setURLX", "URLX"),
+            ("setName", "Name"),
+            ("setUrlY", "urlY"),
+        ] {
             let src = format!("import static a.U.{import}\n{used} = 1\n");
             assert_eq!(rules(&src), vec![], "{src:?}");
         }
