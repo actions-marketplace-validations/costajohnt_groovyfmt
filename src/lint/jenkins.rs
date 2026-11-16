@@ -9,7 +9,9 @@
 //!
 //! Only a declarative pipeline is checked: a top-level `pipeline { }` in a file named
 //! `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`,
-//! `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, or in any file whose first statement it is.
+//! `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, or in any file whose first statement it is,
+//! and a `pipeline { }` in a top-level `call` method of a shared library step
+//! (`vars/*.groovy`): directly in its body, after any other statements, or in an `if` branch.
 //! Scripted pipelines (`node { }`) are never checked.
 
 use super::{Violation, at, constant_value, has_interpolation};
@@ -220,6 +222,47 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     } else if let Some(p) = top.next().filter(|n| n.kind() == "pipeline_statement") {
         pipeline(src, p, v);
     }
+    if named || !library_step(path) {
+        return;
+    }
+    let mut c = root.walk();
+    for m in root.named_children(&mut c).filter(|m| {
+        m.kind() == "method_declaration"
+            && m.child_by_field_name("name")
+                .is_some_and(|n| text(n, src) == "call")
+    }) {
+        if let Some(body) = m.child_by_field_name("body") {
+            step_pipelines(src, body, 0, v);
+        }
+    }
+}
+
+/// The pipelines in a `call` method's body, directly or in the branches of an `if`, the way a
+/// step picks one of several (`if (type == 'web') { pipeline { } } else { pipeline { } }`).
+/// One in a closure, a loop or a `try` is left alone.
+fn step_pipelines(src: &str, n: Node, depth: usize, v: &mut Vec<Violation>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let mut c = n.walk();
+    for s in n.named_children(&mut c) {
+        match s.kind() {
+            "pipeline_statement" => pipeline(src, s, v),
+            "block" | "if_statement" => step_pipelines(src, s, depth + 1, v),
+            _ => {}
+        }
+    }
+}
+
+/// A shared library's global step, `vars/<name>.groovy`, whose `call` method Jenkins runs
+/// when a Jenkinsfile names the step. Only files directly in `vars` are steps.
+fn library_step(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "groovy")
+        && std::path::absolute(path).is_ok_and(|p| {
+            p.parent()
+                .and_then(|d| d.file_name())
+                .is_some_and(|d| d == "vars")
+        })
 }
 
 /// Reads the sections of a block: reports statements that aren't sections, names not in
@@ -1155,6 +1198,90 @@ mod tests {
                 v.iter().any(|v| v.rule == "JenkinsMissingSection"),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn shared_library_steps() {
+        let bad = "pipeline {\n stages { }\n }";
+        let jenkins = |name: &str, src: &str| -> Vec<(&'static str, usize)> {
+            lint_file(Path::new(name), src)
+                .expect("parses")
+                .into_iter()
+                .filter(|v| v.rule.starts_with("Jenkins"))
+                .map(|v| (v.rule, v.line))
+                .collect()
+        };
+        // statements before the pipeline, a typed parameter, positions in the file
+        let step = format!(
+            "import a.B\n\ndef call(Map config) {{\n def x = config.x\n {bad}\n}}\n\ndef call() {{ {bad} }}\n"
+        );
+        let missing = vec![
+            ("JenkinsMissingSection", 5),
+            ("JenkinsMissingSection", 6),
+            ("JenkinsMissingSection", 10),
+            ("JenkinsMissingSection", 11),
+        ];
+        assert_eq!(jenkins("vars/build.groovy", &step), missing);
+        assert_eq!(jenkins("lib/vars/build.groovy", &step), missing);
+        // valid, with the closure-config preamble steps use
+        let valid = format!(
+            "def call(body) {{\n def config = [:]\n body.resolveStrategy = Closure.DELEGATE_FIRST\n body.delegate = config\n body()\n{VALID}}}\n"
+        );
+        assert_eq!(jenkins("vars/build.groovy", &valid), vec![]);
+        // nested `if`s: checked 3 deep, not 5,000 deep, and no stack overflow
+        for (n, found) in [(3, 2), (5_000, 0)] {
+            let src = format!(
+                "def call(c) {{\n{}{bad}{}\n}}\n",
+                "if (c) { ".repeat(n),
+                " }".repeat(n)
+            );
+            assert_eq!(jenkins("vars/build.groovy", &src).len(), found, "{n}");
+        }
+        // each branch of an `if` that picks a pipeline, not the condition
+        let branches = format!(
+            "def call(String type) {{\n if (type == 'a') {{\n {bad}\n }} else if ({{ -> pipeline {{ }} }}) {{\n {bad}\n }} else {{ {bad} }}\n}}\n"
+        );
+        assert_eq!(
+            jenkins("vars/build.groovy", &branches)
+                .iter()
+                .map(|r| r.1)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 7, 8, 10, 11]
+        );
+        for (name, src) in [
+            // not a step: not directly in vars, not .groovy
+            ("src/build.groovy", step.clone()),
+            ("vars/sub/build.groovy", step.clone()),
+            ("vars/build.txt", step.clone()),
+            (
+                "vars/build.groovy",
+                "def call() {\n pipeline { } | x\n}\n".into(),
+            ),
+            (
+                "vars/build.groovy",
+                "def call() {\n pipeline() { stages { } }\n}\n".into(),
+            ),
+            // not `call`; in a closure, loop or `try` in its body
+            ("vars/build.groovy", format!("def run() {{ {bad} }}\n")),
+            (
+                "vars/build.groovy",
+                format!("def call(c) {{\n for (x in c) {{ {bad} }}\n}}\n"),
+            ),
+            (
+                "vars/build.groovy",
+                format!("def call(c) {{\n try {{ {bad} }} finally {{ }}\n}}\n"),
+            ),
+            (
+                "vars/build.groovy",
+                format!("def call() {{\n node {{ {bad} }}\n}}\n"),
+            ),
+            (
+                "vars/build.groovy",
+                format!("class A {{\n def call() {{ {bad} }}\n}}\n"),
+            ),
+        ] {
+            assert_eq!(jenkins(name, &src), vec![], "{name}: {src}");
         }
     }
 

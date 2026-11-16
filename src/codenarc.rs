@@ -1020,7 +1020,7 @@ impl Import {
             }
         }
         if self.defines_set {
-            o += "# groovyfmt's Jenkins, Gradle and Spock rules and UnusedSuppression keep their defaults.\n";
+            o += "# groovyfmt's Jenkins, Gradle and Spock rules, UnusedSuppression and Groovy24EmptyElement keep their defaults.\n";
         }
 
         let mut list = |title: &str, items: Vec<String>| {
@@ -1563,7 +1563,7 @@ mod tests {
             let ours = ["Jenkins", "Gradle", "Spock"]
                 .iter()
                 .any(|p| r.name.starts_with(p))
-                || r.name == "UnusedSuppression";
+                || matches!(r.name, "UnusedSuppression" | "Groovy24EmptyElement");
             assert_eq!(known(r.name), !ours, "{}", r.name);
         }
     }
@@ -1892,6 +1892,10 @@ mod tests {
 
     #[test]
     fn repeated_and_fanned_out_references_are_read_once() {
+        // `count` adds every file actually read to `bytes`, so bytes equal to the files
+        // cached means each was read once: work is counted, not timed (#74)
+        let size = |p: &Path| std::fs::metadata(p).unwrap().len();
+        let cached = |im: &Import| im.cache.keys().map(|p| size(p)).sum::<u64>();
         let d = Dir::new("fanout");
         d.write(
             "one.groovy",
@@ -1899,10 +1903,9 @@ mod tests {
         );
         let many = "    ruleset('one.groovy')\n".repeat(10_000);
         let f = d.write("many.groovy", &format!("ruleset {{\n{many}}}\n"));
-        let t = std::time::Instant::now();
         let im = import(&[f]).unwrap();
-        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
         assert_eq!(im.cache.len(), 2);
+        assert_eq!(im.bytes, cached(&im));
         assert!(im.insts.len() <= 2 * RULES.len());
         assert!(im.states()["DeadCode"]);
         // a diamond 30 levels deep, each level referencing the next twice: 2^30 paths
@@ -1917,11 +1920,12 @@ mod tests {
                 &format!("ruleset {{\n    ruleset('{next}')\n    ruleset('{next}') {{ exclude 'UnusedImport' }}\n}}\n"),
             );
         }
-        let t = std::time::Instant::now();
         let im = import(&[d.0.join("l0.groovy")]).unwrap();
-        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
         // the chain stops at the reference depth limit, with a note
         assert_eq!(im.cache.len(), MAX_REFS);
+        // plus the file past the limit, read for each of its two references and not cached
+        let past = size(&d.0.join(format!("l{MAX_REFS}.groovy")));
+        assert_eq!(im.bytes, cached(&im) + 2 * past);
         assert!(im.toml().contains("more than 8 deep"));
         // wide instead: 7 levels of 10 files, each referencing all 10 of the next level
         for k in 0..7 {
@@ -1939,10 +1943,9 @@ mod tests {
                 );
             }
         }
-        let t = std::time::Instant::now();
         let im = import(&[d.0.join("w0_0.groovy")]).unwrap();
-        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
         assert_eq!(im.cache.len(), 61);
+        assert_eq!(im.bytes, cached(&im));
         assert!(im.states()["UnusedImport"]);
         // the whole-import caps stop a configuration that needs more
         let refs = (0..MAX_FILES + 5)

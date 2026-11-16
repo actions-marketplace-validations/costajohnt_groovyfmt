@@ -1,6 +1,6 @@
 # Lint
 
-`groovyfmt --lint` has 77 rules, 55 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
+`groovyfmt --lint` has 81 rules, 57 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
 
 The general rules are named after their [CodeNarc](https://codenarc.org/) equivalents, so existing configurations map across. The Jenkins, Gradle and Spock rules catch, in milliseconds, mistakes those tools otherwise report only when a build runs.
 
@@ -28,12 +28,13 @@ Turn a rule on or off in the `[lint]` table of [`.groovyfmt.toml`](configuration
 | DuplicateCaseStatement | on | two `case` labels for the same constant (`'a'` and `"a"` count as the same) |
 | AssignmentInConditional | on | `if (x = 1)`, where `==` was probably meant; `while (x = next())` is a common idiom and is exempt, and so is an assignment in extra parentheses, `if ((m = re.matcher(s)))` |
 | ConstantIfExpression | on | an `if` whose condition is a literal, so one branch never runs |
-| UnnecessaryGString | off | a double-quoted string with nothing to interpolate (noisy where double quotes are the house style) |
+| UnnecessaryGString | off | a double-quoted string with nothing to interpolate (noisy where double quotes are the house style). Fixable |
 | UnusedSuppression | off | a `groovyfmt-ignore` comment that suppresses nothing (or names no rule), or a CodeNarc comment or `@SuppressWarnings` naming a groovyfmt rule it doesn't suppress ([suppressing reports](#suppressing-reports)) |
 | ComparisonWithSelf | off | a variable compared with itself (Spock equality checks do this on purpose); not inside a GORM where query (`Book.where { title == title }`, `@Where`), where the left side is the domain property |
 | DoubleNegative | off | `!!x` or `!(!x)` (`!!x` is a common way to turn a value into a boolean) |
 | ForLoopShouldBeWhileLoop | off | `for (; condition;)`, a `for` loop with only a condition (a style preference) |
 | ClassNameSameAsFilename | off | a file whose only top-level code is one class, interface, enum, trait or annotation type, named other than the file less its `.groovy` (a naming convention); a file with any other top-level code is a script and isn't checked |
+| Groovy24EmptyElement | on | an empty argument, list element or map entry, `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`: Groovy 2.4 (Hubitat, SmartThings) drops it, and Groovy 3 and later reject the file. It is on by default because the extra comma never does anything, so removing it is safe on every version. The formatter keeps it as written. Fixable |
 
 A block holding only a comment doesn't count as empty.
 
@@ -114,12 +115,27 @@ The project is the nearest directory at or above the file holding `.git` or a co
 
 Matching by name means an unused member can be missed when another file of the project uses the same name for something else.
 
+A private member used only by a DSL script evaluated with the class as its delegate (a `DelegatingScript`, a builder) is reported, since nothing in Groovy code names it: the script calls it bare. Removing it breaks the script, so mark it `@SuppressWarnings('UnusedPrivateMethod')` or `@SuppressWarnings('UnusedPrivateField')`, or put that on the class to cover all its members. `--explain` says the same.
+
 ### Jenkinsfiles
 
 These rules catch what the Declarative Pipeline plugin rejects when a build starts. They check a top-level `pipeline { }` in either of these:
 
 - a file named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`
 - any file whose first statement it is (after comments and imports)
+
+They also check the pipelines of a shared library's steps: a `.groovy` file directly in a `vars` directory, where a `pipeline { }` in a top-level `call` method is checked, whether it stands in the method's body (after any other statements) or in a branch of an `if` there that picks one of several pipelines. Reports point at the lines in the file. A `pipeline { }` in a closure, a loop or a `try` inside `call`, or in a method with another name, is left alone.
+
+```groovy
+// vars/buildApp.groovy
+def call(Map config) {
+    config.label = config.label ?: 'linux'
+    pipeline {
+        agent { label config.label }
+        stages { ... }
+    }
+}
+```
 
 Scripted pipelines (`node { }`) are left alone. Directory walks find pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins` ([which files](usage.md#which-files)); name other pipeline files on the command line, with `--force`. A script found by its `#!groovy` line is Groovy, not a pipeline by its name: the rules check it only when `pipeline { }` is its first statement.
 
@@ -155,15 +171,20 @@ These apply in `*.gradle` files.
 
 | Rule | Default | Flags |
 |---|---|---|
-| GradleRemovedConfiguration | on | `compile`, `runtime`, `testCompile` or `testRuntime` dependencies, removed in Gradle 7.0 (the message names the replacement); not when the build declares a configuration of that name itself, or when the nearest `gradle/wrapper/gradle-wrapper.properties` (in the script's directory or above) pins a Gradle below 7.0, which still has them |
-| GradleJcenter | on | `jcenter()`, deprecated in Gradle 7.0 and removed in 9.0 |
-| GradleLeftShiftTask | on | `task name << { }`, removed in Gradle 5.0 |
+| GradleRemovedConfiguration | on | `compile`, `runtime`, `testCompile` or `testRuntime` dependencies, removed in Gradle 7.0 (the message names the replacement); not when the build declares a configuration of that name itself, or when the nearest `gradle/wrapper/gradle-wrapper.properties` (in the script's directory or above) pins a Gradle below 7.0, which still has them. Fixable ([fixing](#fixing)) |
+| GradleJcenter | on | `jcenter()`, deprecated in Gradle 7.0 and removed in 9.0. Fixable |
+| GradleLeftShiftTask | on | `task name << { }`, removed in Gradle 5.0. Fixable |
+| GradleSpaceAssignment | on | Groovy DSL space assignment, `name value` for `name = value`, which Gradle 8.12 deprecated and Gradle 10 removes: `description`, `group` or `version` setting the project's property (at the top level, or in `allprojects`, `subprojects` or `project(':x')`), or `description` or `group` in a task's block (`task x { }`, `task x(type: T) { }`, `task('x') { }`, `tasks.register`, `tasks.create` or `tasks.named`), as a statement of its own: not `group 'a' version 'b'` or `version 'a' call()`, which Groovy reads as a call chain (`group('a').version('b')`), nor a line a `\` continues. Quiet when the nearest wrapper pins a Gradle before 8.12, and in `settings.gradle` and init scripts. Fixable |
+| GradleDependencyTuple | off | a dependency in map notation, `implementation group: 'a', name: 'b', version: '1'`, where the string `'a:b:1'` says the same: only `group`, `name` and `version` keys (`group` and `name` required), each a plain string. Gradle 9.1 deprecated this notation; off by default as a style choice for builds on older Gradle. Fixable |
+| GradleDependencyParentheses | off | a dependency in parentheses with no closure after it, `implementation('a:b:1')`, whose arguments (strings, names, dotted names, calls without a closure, named arguments, on one line) read the same without them (a style choice). Fixable |
 | GradleDynamicVersion | off | a `+` or `latest.*` dependency version (whether to pin is a policy choice) |
 | GradleRemovedApi | on | what a Gradle upgrade guide lists as removed, with the version and the replacement in the message: the `maven` plugin and the `uploadArchives` task (7.0, use `maven-publish`); the `findbugs`, `jdepend`, `osgi`, `announce`, `build-announcements` and `compare-gradle-builds` plugins (6.0) and the old JVM and JavaScript plugins (7.0); `configurations.compile`, `.runtime`, `.testCompile` and `.testRuntime` (7.0, unless the build declares that configuration); and `archiveName`, `baseName`, `classifier`, `destinationDir`, `appendix` or `extension` set in an archive task's block (8.0, use `archiveFileName`, `archiveBaseName` and so on). An archive task's block is `jar`, `war`, `ear`, `bootJar`, `bootWar`, `shadowJar`, `sourcesJar`, `javadocJar`, `distZip` or `distTar` at the top level (or in `allprojects`, `subprojects`, `project`, `configure`, `afterEvaluate` or `tasks`), or a task block typed `Jar`, `Zip`, `Tar`, `War`, `Ear`, `ShadowJar`, `BootJar` or `BootWar`. Quiet when the nearest wrapper pins a Gradle older than the removal |
 
 #### What the Gradle rules cover
 
 The rules read the build script and the nearest wrapper version; they do not invoke Gradle or require the project to configure successfully.
+
+GradleSpaceAssignment reports only properties known to be properties where the script's delegate is known. Gradle deprecated space assignment for every property, but a name can also be a real method (`id 'x' version '1'` in `plugins { }`, a plugin extension's own `name(String)`), which one file can't tell apart, so `description 'x'` in a `jar { }` block, `version '1'` in a publication and any other property are not reported. On the Groovy build scripts of 8 field-trial checkouts (6,171 `*.gradle` files), it reported 322 places; a fixed-seed sample of 40 had no false positives. The two dependency rules apply to the calls in a `dependencies { }` block other than `add`, `project`, `platform` and the handler's other methods; their samples of 40 (of 456 and 10,372 reports) had none either.
 
 Unused dependencies, undeclared dependencies, duplicate classes across jars and version recommendations all need the resolved dependency graph, so they are out of scope and require a linting tool that runs inside the Gradle build. Those tools and groovyfmt cover different ground and work alongside each other.
 
@@ -181,10 +202,22 @@ These apply in classes whose superclass is `Specification` or ends in `Spec` or 
 
 ## Fixing
 
-`groovyfmt --lint --fix` removes, in place, what four rules flag:
+`groovyfmt --lint --fix` fixes, in place, what these rules flag:
 
-- an `UnusedImport`, `DuplicateImport` or `ImportFromSamePackage` line, with its line break, and only when nothing but whitespace or a `;` shares the line
-- an `UnnecessarySemicolon` `;`
+- an `UnusedImport`, `DuplicateImport` or `ImportFromSamePackage` line is removed, with its line break, and only when nothing but whitespace or a `;` shares the line
+- an `UnnecessarySemicolon` `;` is removed
+- `Groovy24EmptyElement`: the extra comma is removed, with the whitespace back to the comma before it, `foo(a,,b)` becoming `foo(a,b)` (only the comma when a comment is between them). Groovy 2.4 drops the empty element, so the call, list or map is the one 2.4 already compiled, and Groovy 3 and later now accept it. It is fixed only when it is the only empty element in its brackets and no trailing comma follows: Groovy 2.4 rejects `foo(a,,,b)`, `foo(a,,b,,c)` and `[1,,2,]` as well, so code like that compiled nowhere, and it is only reported
+- `UnnecessaryGString` (when turned on): `"text"` becomes `'text'` and `"""text"""` becomes `'''text'''`, the content kept as written. Groovy compiles both to the same String, and its escapes (`\t`, `\"`, a line-ending `\`) mean the same in either. A string holding a `\u` escape is only reported, since Groovy reads `\u0027` as a quote before it reads the string
+- `GradleRemovedConfiguration`: `testCompile` becomes `testImplementation`, `runtime` becomes `runtimeOnly` and `testRuntime` becomes `testRuntimeOnly`. `compile` becomes `implementation` for most builds but `api` for a dependency a library's own API exposes, which only the build's author knows, so it is fixed only when the config's `[lint]` table names the replacement: `gradle_compile_replacement = "implementation"` (or `"api"`). Without it the report stays, and its message says so. A rename is fixed only in a file that applies a Java plugin (`java`, `java-library`, `groovy`, `scala`, `application`, `war`, `java-gradle-plugin`, Kotlin JVM, Ratpack's `io.ratpack.ratpack-java` and `-groovy`, or Android's `com.android.application`, `.library`, `.dynamic-feature` and `.test`, by `apply plugin:` or in `plugins { }`), which makes the new configurations; a file whose plugins come from a parent's `allprojects` or a convention plugin is only reported, and the message says why. `compile` becomes `api` only in a file that applies `java-library` or `com.android.library`
+- `GradleJcenter`: a plain `jcenter()` line in a `repositories { }` block becomes `mavenCentral()`, or is removed when the block already has a plain `mavenCentral()`. `jcenter { ... }` is left as it is
+- `GradleLeftShiftTask`: `task name << { ... }` becomes `task name { doLast { ... } }`, the action kept as written (`task 'name' << { }` is left as it is, as is one with a comment between `<<` and `{` or a line break in it)
+- `GradleSpaceAssignment`: `name value` becomes `name = value`; the check makes sure the result assigns the same text to the same property, as a statement of its own
+- `GradleDependencyTuple`: the map becomes the string, `implementation 'a:b:1'`, with the values' quotes
+- `GradleDependencyParentheses`: the parentheses go, `implementation 'a:b:1'`. It is reported only when each argument starts with a letter, `_` or a quote, and the fixed statement must parse as the same call with the same arguments: without parentheses, `implementation [0, 1].first()` would index a property
+
+A Gradle fix is made only where its report fires, so the wrapper version still decides: a build pinned to a Gradle that still has `testCompile` is left alone, as is a configuration the build declares itself (`configurations { runtime }`, `create('runtime')`, `register('runtime')` and the like in that block).
+
+A fix that fails the checks is dropped and its report stays; the file's other fixes are still made. Fixing repeats until a pass finds nothing more to fix (one pass per level of nested fixes), up to 64 passes.
 
 An import from the file's own package is removed only when the file declares no class of the same name. An `UnnecessaryGroovyImport` is never removed, since it can be what beats a same-named class in the package, which one file can't show.
 
@@ -200,8 +233,8 @@ fixed 4 violations in 1 files (DuplicateImport 1, UnnecessarySemicolon 2, Unused
 As with formatting, each fix is checked before the file is written:
 
 - the fixed file must parse cleanly
-- its tokens must be the original's minus exactly the removed ones
-- its parse tree must keep the original's shape, so removing a `;` can't join two statements or turn one into another's body
+- its tokens outside the fixed code must be the original's
+- its parse tree outside the fixed code must keep the original's shape, so removing a `;` can't join two statements or turn one into another's body, and a rewritten Gradle statement can't take in its neighbor
 - linting it must find the original's other violations and nothing new
 
 A file that fails a check is left as it was and listed as `path not fixed: <why>` on stderr. A file that doesn't parse is never fixed. Writes go through the same path as formatting, so symlinks, permissions, owners, hard links and `exclude` are handled the same way. Running it again changes nothing.
@@ -315,7 +348,7 @@ It reads these formats:
 - `codenarc.properties`, whose `RuleName.enabled = false` lines turn rules off. Named with rulesets, it adjusts the rules they define, as in CodeNarc.
 - npm-groovy-lint's `.groovylintrc.json`, with its `extends` presets and its `rules`, where `"off"`, `enabled: false`, `disabled: true` and `severity: "off"` turn a rule off. With `codenarcRulesets`, those files are read instead of `rules`, as npm-groovy-lint does.
 
-Excludes and includes take CodeNarc's wildcards (`Empty*`) and comma-separated lists. Each groovyfmt rule named after a CodeNarc rule comes out true or false as the configuration says. A rule the configuration doesn't enable comes out false, since CodeNarc wouldn't run it. groovyfmt's Jenkins, Gradle and Spock rules and UnusedSuppression keep their defaults. From a `codenarc.properties` alone, only the rules it names are set.
+Excludes and includes take CodeNarc's wildcards (`Empty*`) and comma-separated lists. Each groovyfmt rule named after a CodeNarc rule comes out true or false as the configuration says. A rule the configuration doesn't enable comes out false, since CodeNarc wouldn't run it. groovyfmt's Jenkins, Gradle and Spock rules, UnusedSuppression and Groovy24EmptyElement keep their defaults. From a `codenarc.properties` alone, only the rules it names are set.
 
 The report after the table lists, of the rules the configuration enables:
 

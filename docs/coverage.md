@@ -38,4 +38,18 @@ How each step changed the share of corpus files that parse cleanly:
 | + `var`, `pipeline` and `trait` as names; generic types as values (`Mock(Supplier<Long>)`); command calls with `new`, `null`, `!` or dotted first arguments and in parentheses (`(el x).click()`); anonymous class bodies; `instanceof` pattern variables; slashy strings starting with a space; `\` line continuations; annotated and `final` closure parameters, `default` methods and smaller forms | 99.5% |
 | + Groovy 5 and 6 forms (`for await`, `case Integer i when`, indexed `for (i, x in xs)`, `??`); `\\/` in slashy strings; a comparison right after a name (`i<n ? a : b`); quoted command names (`'x:title' lang: 'en'`) and calls chained onto calls; `new`, `switch`, `in` and `static` as names; nested array initializers and `{a, b}` annotation arrays; spaced and annotated type arguments and smaller forms | 99.6% |
 
-[Development](../README.md#development) explains how to change the grammar.
+[Development](development.md#changing-the-grammar) explains how to change the grammar.
+
+## Speed
+
+Against [npm-groovy-lint](https://github.com/nvuillam/npm-groovy-lint) 19.0.1 (CodeNarc 3.7.0) on the [spock](https://github.com/spockframework/spock) repository, 635 files, 4-core Linux box:
+
+| task | npm-groovy-lint | groovyfmt |
+|---|---|---|
+| lint, the same four rules | 19.5 s | 0.11 s (all 14 rules then on by default) |
+| lint, npm-groovy-lint's default rule set | 30.3 s | |
+| format | did not finish in 15 min (two attempts) | 0.19 s |
+
+The groovyfmt figures were measured on 2026-11-10 with a build between 0.5.0 and 0.6.0, when 14 rules were on by default. Today 56 are.
+
+The comparison flatters groovyfmt somewhat. It skips the 9 spock files it can't parse, which npm-groovy-lint still processes, and CodeNarc's default rule set is far larger. All 9 are generated AST snapshots used as test fixtures, and 8 of them aren't valid Groovy source.

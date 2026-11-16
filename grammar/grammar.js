@@ -267,6 +267,14 @@ module.exports = grammar({
     // the label's last operand, never a lambda's parameter: `case FOO -> 1`,
     // `case a < b -> 3`.
     $._case_arrow,
+    // The one name argument of a command call that is a closure's whole body,
+    // when `}` follows it on its line: `{ x -> println x }` (lexed like
+    // `_command_name_argument`).
+    $._closure_command_argument,
+    // The `(` of a lambda's parameters that is a command call's argument,
+    // after a space: `configurations.all (Configuration it) -> { }`. The
+    // scanner finds the balanced `(…)` and then `->`; otherwise it is a call's.
+    $._command_lambda_open,
     // Never referenced by a rule: valid only during error recovery, when
     // the scanner must not emit context-sensitive tokens.
     $._error_sentinel,
@@ -275,6 +283,11 @@ module.exports = grammar({
   conflicts: $ => [
     // `final def x` / `final x = 1` in a block vs. a modified member at top level.
     [$._modifier, $.local_variable_declaration],
+    // `for (final int i; …)`: the for loop's bare declaration or a `final`
+    // typed declaration, which read the same.
+    [$._for_bare_declaration, $.local_variable_declaration],
+    // `for (@A final x …`: a for-in loop's modifiers or an annotated declaration.
+    [$._modifier, $.local_variable_declaration, $.for_in_statement],
     // `for (int i, j; …)` and `for (int i, int j in …)` split at the comma.
     [$._bare_declarator, $.for_in_statement],
     // `if (a) foo b bar c` then `else`: a chain of names, or statements.
@@ -579,6 +592,7 @@ module.exports = grammar({
       // A call chained onto a call on the same line, as Groovy's command
       // chains allow: `isOrIsCausedBy(e, A) or(isOrIsCausedBy(e, B))`.
       $._call_chain,
+      $._lambda_command,
       // `if (c) a.b key` then `else`: a name alone after a dotted receiver,
       // with the statement ending after it.
       seq(
@@ -672,7 +686,7 @@ module.exports = grammar({
       alias($._subscript_open, '['),
       optional(seq(
         choice($._expression, $.spread_arguments),
-        repeat(seq(',', choice($._expression, $.spread_arguments))),
+        repeat(seq(',', repeat(','), choice($._expression, $.spread_arguments))),
         optional(','),
       )),
       ']',
@@ -682,7 +696,7 @@ module.exports = grammar({
       const entry = choice($.map_entry, $.spread_map_entry);
       return seq(
         alias($._subscript_open, '['),
-        choice(':', seq(entry, repeat(seq(',', entry)), optional(','))),
+        choice(':', seq(entry, repeat(seq(',', repeat(','), entry)), optional(','))),
         ']',
       );
     },
@@ -713,9 +727,14 @@ module.exports = grammar({
     // closure (§5.8). A `prec(1, …)` keeps block preferred at use
     // sites where both `block` and a closure-bearing `_statement`
     // are valid alternatives (e.g. the body slot of `if` / `while`).
+    // One command call as the whole body, as for a closure (see closure):
+    // `for (k in m) { println k }`.
     block: $ => prec(1, seq(
       '{',
-      repeat(choice($._statement, ';', $._line_break)),
+      choice(
+        repeat(choice($._statement, ';', $._line_break)),
+        alias($._closure_command, $.command_chain),
+      ),
       '}',
     )),
 
@@ -783,6 +802,8 @@ module.exports = grammar({
       optional(choice(
         seq(field('init', $._expression), repeat(seq(',', field('init', $._expression)))),
         field('init', $.local_variable_declaration),
+        // `for (def (int i, int j) = [0, 0]; i < 5; i++)` (Groovy 3+)
+        field('init', alias($._for_multi_assignment, $.multi_assignment_declaration)),
         // `for (int i; i < 3; i++)`: a typed declaration without a value.
         field('init', alias($._for_bare_declaration, $.local_variable_declaration)),
       )),
@@ -796,6 +817,18 @@ module.exports = grammar({
       ')',
       // also an empty body: `for (i = 0; i < 5; i++);`
       field('body', choice($.block, $._statement, ';')),
+    ),
+
+    // `def` only: `final` and annotations there would compete with a for-in
+    // loop's modifiers.
+    _for_multi_assignment: $ => seq(
+      'def',
+      '(',
+      $._multi_assignment_target,
+      repeat(seq(',', $._multi_assignment_target)),
+      ')',
+      '=',
+      field('value', $._expression),
     ),
 
     _for_bare_declaration: $ => seq(
@@ -985,12 +1018,14 @@ module.exports = grammar({
       '>',
     ),
 
+    // A bound may carry type-use annotations: `<T extends @A CharSequence>`.
     type_parameter: $ => seq(
       field('name', alias($.identifier, $.type_identifier)),
       optional(seq(
         'extends',
+        repeat($.annotation),
         $._type,
-        repeat(seq('&', $._type)),
+        repeat(seq('&', repeat($.annotation), $._type)),
       )),
     ),
 
@@ -1504,6 +1539,33 @@ module.exports = grammar({
         $.variable_declarator,
         repeat(seq(',', $.variable_declarator)),
       ),
+      // After `final` a type and a name can't be a command call, so no
+      // declarator needs a value: `final String a, b`, `final int c`.
+      // prec.dynamic: not `final String` and then the statement `a`.
+      prec.dynamic(1, seq(
+        'final',
+        field('type', $._type),
+        alias($._bare_declarator, $.variable_declarator),
+        repeat(seq(',', $.variable_declarator)),
+      )),
+      // `@A final x = 1` with `final` as the token, not a `_modifier`: as the
+      // first statement of a block the parser would otherwise drop the block
+      // for a closure with the parameter `@A final x`; this way both stay
+      // open until `->` or the `=` decides. The untyped form loses to the
+      // typed one as below.
+      seq(
+        repeat1($.annotation),
+        'final',
+        field('type', $._type),
+        $.variable_declarator,
+        repeat(seq(',', $.variable_declarator)),
+      ),
+      prec.dynamic(-1, seq(
+        repeat1($.annotation),
+        'final',
+        $.variable_declarator,
+        repeat(seq(',', $.variable_declarator)),
+      )),
       // Annotations may also follow modifiers: `static @Field x = 1`,
       // `final @Deprecated x = 1`.
       seq(
@@ -1539,7 +1601,39 @@ module.exports = grammar({
 
     // The value of a declaration or assignment, which may be a command call:
     // `def r = sh returnStdout: true, script: 'x'`.
-    _value: $ => choice($._expression, alias($._value_command, $.command_chain)),
+    _value: $ => choice(
+      $._expression,
+      alias($._value_command, $.command_chain),
+      alias($._lambda_command, $.command_chain),
+    ),
+
+    // A spaced call whose one argument is a lambda with parenthesized
+    // parameters (Groovy 3+): `configurations.all (Configuration it) -> { }`,
+    // `def r = foo () -> { }`. See `_command_lambda_open`.
+    _lambda_command: $ => seq(
+      field('receiver', choice(
+        $.identifier,
+        $.field_access,
+        $.safe_navigation_expression,
+        $.spread_dot_expression,
+      )),
+      field('argument', alias($._command_lambda, $.lambda_expression)),
+    ),
+
+    _command_lambda: $ => prec.right(PREC.ASSIGN, seq(
+      field('parameters', alias($._command_lambda_parameters, $.formal_parameters)),
+      '->',
+      field('body', choice($.block, $._value)),
+    )),
+
+    _command_lambda_parameters: $ => seq(
+      alias($._command_lambda_open, '('),
+      optional(seq(
+        $.formal_parameter,
+        repeat(seq(',', $.formal_parameter)),
+      )),
+      ')',
+    ),
 
     // §5.5 — a command call as a value. Its first argument starts on the
     // receiver's line (`_command_value_start`), and may be any expression,
@@ -1871,7 +1965,7 @@ module.exports = grammar({
     // prec.dynamic: `x as A.B<C>` is a cast to a generic type, never the
     // comparison chain `(x as A.B) < C > …` that `_dotted_type` would win.
     // A dotted name may also take type arguments or `[]` here:
-    // `x as java.util.concurrent.Callable<T>`, `[] as A.B[]`.
+    // `x as java.util.concurrent.Callable<T>`, `[] as A.B[]`, `[] as A.B<C>[]`.
     _cast_type: $ => choice(
       alias($.identifier, $.type_identifier),
       $.array_type,
@@ -1892,6 +1986,7 @@ module.exports = grammar({
     _dotted_array_type: $ => prec(PREC.ARRAY_TYPE, seq(
       choice(
         alias($._dotted_type, $.qualified_type),
+        alias($._dotted_generic_type, $.generic_type),
         alias($._dotted_array_type, $.array_type),
       ),
       alias($._subscript_open, '['),
@@ -2339,9 +2434,11 @@ module.exports = grammar({
       ')',
     ),
 
+    // Groovy 2.4 drops an empty argument, `foo(a,,b)` (3 and 4 reject it). The
+    // extra commas stay tokens of the list, as they do in list and map literals.
     _argument_list_body: $ => seq(
       $._argument,
-      repeat(seq(',', $._argument)),
+      repeat(seq(',', repeat(','), $._argument)),
       optional(','),
     ),
 
@@ -2381,18 +2478,26 @@ module.exports = grammar({
     // Several indexes select several elements: `list[1, 2]`, `map['a', 'b']`.
     // An index may be spread: `(1..5)[*1..3]`.
     // An empty map is an index too: `render [:] as JSON` is `render[:]`.
+    // So are named entries, which make one map: `A[x: 1, y: 2]`, `A[*: m]`.
     subscript_expression: $ => prec.left(PREC.POSTFIX, seq(
       field('object', $._expression),
       alias($._subscript_open, '['),
       choice(
         seq(
-          field('index', choice($._expression, $.spread_arguments)),
-          repeat(seq(',', field('index', choice($._expression, $.spread_arguments)))),
+          field('index', $._subscript_index),
+          repeat(seq(',', field('index', $._subscript_index))),
         ),
         ':',
       ),
       ']',
     )),
+
+    _subscript_index: $ => choice(
+      $._expression,
+      $.spread_arguments,
+      alias($.map_entry, $.named_argument),
+      $.spread_map_entry,
+    ),
 
     // An empty index is valid on a list literal, `def l = [][]`; elsewhere
     // `x[]` stays an array type. A string takes one too: `"x"[]` is
@@ -2406,10 +2511,12 @@ module.exports = grammar({
     // `?[` is one token. `a ? [b] : c` (with space) still parses
     // as ternary plus list because tree-sitter's lexer never
     // crosses a whitespace boundary to extend a multi-char token.
+    // Several or named indexes as for `[`: `a?[1, 2]`, `A?[name: 1]`.
     safe_subscript_expression: $ => prec.left(PREC.POSTFIX, seq(
       field('object', $._expression),
       '?[',
-      field('index', $._expression),
+      field('index', $._subscript_index),
+      repeat(seq(',', field('index', $._subscript_index))),
       ']',
     )),
 
@@ -2607,11 +2714,28 @@ module.exports = grammar({
     // has no `->` and an implicit `it` parameter (we do NOT emit a
     // synthetic `it` per §5.8). Default values and varargs land later.
     // The parameters may start on the line after the `{`.
+    // A body that is one command call with one name argument, `}` right after
+    // it on its line, is read as that call, as Groovy reads it and as for a
+    // lambda's body: `{ x -> println x }`, `{ println it }`. Elsewhere
+    // `foo bar` stays two statements (see command_chain).
     closure: $ => seq(
       '{',
       optional(seq(optional($._line_break), $.closure_parameters)),
-      repeat(choice($._statement, ';', $._line_break)),
+      choice(
+        repeat(choice($._statement, ';', $._line_break)),
+        alias($._closure_command, $.command_chain),
+      ),
       '}',
+    ),
+
+    _closure_command: $ => seq(
+      field('receiver', choice(
+        $.identifier,
+        $.field_access,
+        $.safe_navigation_expression,
+        $.spread_dot_expression,
+      )),
+      field('argument', alias($._closure_command_argument, $.identifier)),
     ),
 
     closure_parameters: $ => seq(
@@ -2658,7 +2782,8 @@ module.exports = grammar({
         alias($._lambda_parameters, $.formal_parameters),
       )),
       '->',
-      field('body', choice($.block, $._expression)),
+      // The body may be a command call: `v -> println v` (Groovy 3+).
+      field('body', choice($.block, $._value)),
     ))),
 
     // A lambda's `(` starts an expression, so it is the in-grammar `(`,
@@ -2677,12 +2802,13 @@ module.exports = grammar({
     // form (see map_literal). Tree-sitter splits the parse between
     // list_literal and map_literal until a `:` or `]` disambiguates;
     // the conflict declaration above keeps both alternatives alive.
-    // Elements may be spread: `[*a, *b]`.
+    // Elements may be spread: `[*a, *b]`. Groovy 2.4 drops an empty element,
+    // `[a,,b]` (see `_argument_list_body`).
     list_literal: $ => seq(
       '[',
       optional(seq(
         choice($._expression, $.spread_arguments),
-        repeat(seq(',', choice($._expression, $.spread_arguments))),
+        repeat(seq(',', repeat(','), choice($._expression, $.spread_arguments))),
         optional(','),
       )),
       ']',
@@ -2702,7 +2828,8 @@ module.exports = grammar({
           ':',
           seq(
             entry,
-            repeat(seq(',', entry)),
+            // `[a: 1,, b: 2]`: Groovy 2.4's empty element (see `_argument_list_body`)
+            repeat(seq(',', repeat(','), entry)),
             optional(','),
           ),
         ),
@@ -2855,7 +2982,8 @@ module.exports = grammar({
         /'[^']/,
         /''[^']/,
       )),
-      '\'\'\'',
+      // the content may end with one or two quotes: `'''a='b''''`
+      /''''?'?/,
     )),
 
     // §5.7 / §6.3 — double-quoted GString. The opening `"` is
@@ -2886,7 +3014,8 @@ module.exports = grammar({
     _triple_double_quoted_string: $ => seq(
       '"""',
       repeat(gstringPart($, $._triple_gstring_text)),
-      token.immediate('"""'),
+      // the content may end with one or two quotes: `"""say "hi""""`
+      alias(token.immediate(/""""?"?/), '"""'),
     ),
 
     _triple_gstring_text: _ => token.immediate(repeat1(choice(

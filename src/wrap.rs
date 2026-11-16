@@ -1027,7 +1027,13 @@ impl Ctx<'_> {
         }
         let mut c = n.walk();
         let kids: Vec<Node> = n.children(&mut c).collect();
-        if kids.iter().any(|k| k.kind().contains("comment")) {
+        // not with a comment, nor with Groovy 2.4's empty element (`f(a,,b)`), which stays as
+        // written: a break would split it
+        if kids.iter().any(|k| k.kind().contains("comment"))
+            || kids
+                .windows(2)
+                .any(|w| w[0].kind() == "," && w[1].kind() == ",")
+        {
             return None;
         }
         let mut items = kids.iter().filter(|k| k.is_named());

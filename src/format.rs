@@ -214,8 +214,17 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
     let mut out: Vec<(String, &str)> = Vec::new();
     // per output line, for `spacing`: its text's source offset and indent length
     let mut bodies: Vec<Option<(usize, usize)>> = Vec::new();
+    // tab stops, as `spacing` counts them
+    let tab = if style.use_tabs {
+        style.indent.max(1)
+    } else {
+        8
+    };
+    // the lines with a tab after their indent that moved off their tab stops (see below)
+    let mut shifted: Vec<Option<(usize, usize)>> = Vec::new();
     let mut line_start = 0usize;
     let mut row_indent: Vec<usize> = Vec::new(); // final indent of each row, for children to inherit
+    let mut verbatim: Vec<bool> = Vec::new(); // rows that begin inside a multi-line token
     let mut labels = LabelCache::default();
     // asked about each line's start, then its first token, then its end: always forward
     let mut walk = Walk::new(root);
@@ -239,13 +248,17 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
         if inside_token(&mut walk, line_start, src) {
             // Line begins inside a multi-line string or comment: emit verbatim.
             row_indent.push(style.cols(&content[..lead]));
+            verbatim.push(true);
             out.push((content.to_string(), eol));
             bodies.push(None);
+            shifted.push(None);
         } else if body.trim().is_empty() {
             row_indent.push(0);
+            verbatim.push(false);
             if out.last().is_some_and(|(l, _)| !l.is_empty()) {
                 out.push((String::new(), eol));
                 bodies.push(None);
+                shifted.push(None);
             }
         } else {
             // `//` at column 0 is commented-out code or a doc-snippet marker; IntelliJ leaves
@@ -254,7 +267,7 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
                 0
             } else {
                 let path = leaf_path(&mut walk, pos);
-                indent_for(&path, src, &row_indent, style, &mut labels)
+                indent_for(&path, src, &row_indent, &verbatim, style, &mut labels)
             };
             if indent > MAX_INDENT {
                 return Err("nesting too deep to format");
@@ -262,26 +275,24 @@ fn reindent(src: &str, tree: &Tree, style: &Style) -> Result<String, &'static st
             let keep_trailing = line_end < src.len() && inside_token(&mut walk, line_end, src);
             let text = if keep_trailing { body } else { body.trim_end() };
             row_indent.push(indent);
+            verbatim.push(false);
             let pad = style.pad(indent);
             bodies.push(Some((pos, pad.len())));
+            // a tab after the indent of a line whose indent moved by other than a whole tab
+            // stop would no longer line up with the lines around it (#133)
+            let moved = crate::spacing::width_at(&content[..lead], 0, tab) % tab
+                != crate::spacing::width_at(&pad, 0, tab) % tab;
+            shifted.push((moved && text.contains('\t')).then_some((pos, pad.len())));
             out.push((pad + text, eol));
         }
         line_start = line_end + 1;
     }
-    if style.normalize_spacing
-        && !crate::spacing::respace(
-            src,
-            tree,
-            &mut out,
-            &bodies,
-            if style.use_tabs {
-                style.indent.max(1)
-            } else {
-                8
-            },
-        )
-    {
-        return Err("spacing did not settle");
+    if style.normalize_spacing {
+        if !crate::spacing::respace(src, tree, &mut out, &bodies, tab) {
+            return Err("spacing did not settle");
+        }
+    } else if shifted.iter().any(Option::is_some) {
+        crate::spacing::expand_tabs(src, tree, &mut out, &shifted, tab);
     }
     while out.last().is_some_and(|(l, _)| l.is_empty()) {
         out.pop();
@@ -420,6 +431,7 @@ fn indent_for(
     path: &[Step],
     src: &str,
     row_indent: &[usize],
+    verbatim: &[bool],
     style: &Style,
     labels: &mut LabelCache,
 ) -> usize {
@@ -444,7 +456,7 @@ fn indent_for(
     // continuation lines before the brace (`void f(String a,\n        String b) {`): indent the
     // body from the line the declaration starts on. Closures keep their own line, since they
     // hang off chained calls.
-    let anchor_row = match a.kind() {
+    let mut anchor_row = match a.kind() {
         "block" | "class_body" | "enum_body" | "switch_block"
             if !matches!(above.kind(), "block" | "closure" | "source_file") =>
         {
@@ -452,6 +464,18 @@ fn indent_for(
         }
         _ => a.start_position().row,
     };
+    // A `{` opened on the line where a multi-line string ends (`foo(x: '''` ... `''') {`):
+    // that line's indent is the string's text, so indent from the statement around it (#144).
+    if verbatim.get(anchor_row) == Some(&true)
+        && a.child(0).is_some_and(|c| text(c, src) == "{")
+        && let Some(r) = path[..i - 1]
+            .iter()
+            .rev()
+            .map(|(n, _)| n.start_position().row)
+            .find(|&r| r < anchor_row && verbatim.get(r) == Some(&false))
+    {
+        anchor_row = r;
+    }
     let base = row_indent.get(anchor_row).copied().unwrap_or(0);
 
     let first = text(leaf, src);
@@ -557,6 +581,38 @@ mod tests {
             fmt(src),
             "def s = '''\n   keep   \n  this\n'''\nprintln s\n"
         );
+    }
+
+    #[test]
+    fn block_opened_where_a_multiline_string_ends() {
+        let spaced = Style {
+            normalize_spacing: true,
+            ..Style::default()
+        };
+        for q in ["'''", "\"\"\""] {
+            let src = format!(
+                "a {{\n  b {{\n    foo(x: {q}\nbar\n{q}) {{\n      c()\n    }}\n    d()\n  }}\n}}\n"
+            );
+            let want = format!(
+                "a {{\n    b {{\n        foo(x: {q}\nbar\n{q}) {{\n            c()\n        }}\n        d()\n    }}\n}}\n"
+            );
+            for style in [Style::default(), spaced] {
+                let out = match format(&src, &style) {
+                    Outcome::Formatted(o) => o,
+                    other => panic!("{other:?}"),
+                };
+                assert_eq!(out, want);
+                assert_eq!(format(&want, &style), Outcome::Unchanged, "idempotent");
+            }
+        }
+        // a string that ends on its own line, and one that doesn't open a block, are as before
+        for src in [
+            "a {\n    foo(x: '''\nbar\n''')\n    d()\n}\n",
+            "a {\n    def s = '''\nbar\n'''\n    d()\n}\n",
+            "a {\n    foo('''\nbar\n''', y)\n}\n",
+        ] {
+            assert_eq!(fmt(src), src);
+        }
     }
 
     #[test]
@@ -807,6 +863,51 @@ mod tests {
             fmt(want),
             "class A {\n    def f() {\n        render(view: 'x',\n            model: 1)\n        def s = '''\n\t keep\n'''\n    }\n}\n"
         );
+    }
+
+    #[test]
+    fn interior_tabs_keep_their_columns_when_reindented() {
+        // #133: tab-aligned values under a two-tab indent, re-indented to four spaces
+        let src = "def m = [\n\t\tname:\t\t\t\t\"x\",\n\t\tmultiple:\t\t\ttrue, // c\n\t\tz:\t1\t// d\n]\n";
+        let pad = |n| " ".repeat(n);
+        let want = format!(
+            "def m = [\n    name:{}\"x\",\n    multiple:{}true, // c\n    z:{}1\t// d\n]\n",
+            pad(27),
+            pad(23),
+            pad(6)
+        );
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(&want), want, "idempotent");
+        // normalize_spacing gives one column whether it runs on the source or on the above
+        let spacing = Style {
+            normalize_spacing: true,
+            ..Style::default()
+        };
+        let both = |s: &str| match format(s, &spacing) {
+            Outcome::Formatted(o) => o,
+            other => panic!("{other:?}"),
+        };
+        let direct = both(src);
+        assert_eq!(both(&want), direct);
+        assert!(
+            direct.contains(&format!("name:{}\"x\"", pad(27))),
+            "{direct}"
+        );
+        // tabs stay where the indent moved by whole tab stops, and with use_tabs
+        let whole = "if (x) {\n\tif (y) {\n\t\ta =\t1\n\t}\n}\n";
+        assert_eq!(
+            fmt(whole),
+            "if (x) {\n    if (y) {\n        a =\t1\n    }\n}\n"
+        );
+        let tabs = Style {
+            use_tabs: true,
+            ..Style::default()
+        };
+        let tabbed = "def m = [\n\tname:\t\"x\"\n]\n";
+        assert_eq!(format(tabbed, &tabs), Outcome::Unchanged);
+        // tabs in strings and comments are never touched
+        let s = "def f() {\n\t\tdef s = 'a\tb' /* c\td */\n}\n";
+        assert_eq!(fmt(s), "def f() {\n    def s = 'a\tb' /* c\td */\n}\n");
     }
 
     #[test]

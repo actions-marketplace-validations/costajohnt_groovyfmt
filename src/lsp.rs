@@ -494,12 +494,14 @@ impl Server {
                     .iter()
                     .any(|o| kind == *o || kind.strip_prefix(o).is_some_and(|r| r.starts_with('.')))
         };
-        let (Ok(vs), Ok(base)) = (
+        let (Ok(mut vs), Ok(base)) = (
             lint::lint_file(&doc.path, &doc.text),
             baseline_of(doc, &cfg),
         ) else {
             return Ok("[]".into());
         };
+        let compile = cfg.gradle_compile_replacement.as_deref();
+        lint::opt_in_fixes(&mut vs, &doc.text, compile);
         // nothing the baseline holds is fixed, as on the command line
         let held = |v: &lint::Violation, text: &str| {
             base.as_ref()
@@ -542,7 +544,7 @@ impl Server {
                 let this = |w: &lint::Violation, _: &str| {
                     (w.rule, w.line, w.col, &w.message) == (v.rule, v.line, v.col, &v.message)
                 };
-                if let Fix::Fixed(new, _) = fix::fix(&doc.path, &doc.text, this) {
+                if let Fix::Fixed(new, _) = fix::fix(&doc.path, &doc.text, compile, this) {
                     let (s, e) = (
                         lines.offset(v.line, v.col),
                         lines.offset(v.end_line, v.end_col),
@@ -563,7 +565,7 @@ impl Server {
             }
         }
         if want(FIX_ALL)
-            && let Fix::Fixed(new, _) = fix::fix(&doc.path, &doc.text, |v, text| {
+            && let Fix::Fixed(new, _) = fix::fix(&doc.path, &doc.text, compile, |v, text| {
                 cfg.rule_enabled(v.rule) && !held(v, text)
             })
         {
