@@ -219,18 +219,30 @@ fn check(
     // the other violations stay, except one inside an edited range (a `;` whose rule is off,
     // an unused import that is also unnecessary, a dynamic version in a rewritten
     // dependency), whose counterpart in the new text isn't compared either; new fixable ones
-    // are left for the next round
-    let key = |v: &Violation| (v.rule, v.message.clone());
+    // are left for the next round. One whose span holds a replacement is compared by rule
+    // alone, as its message can quote the replaced code (`"a" == "b"` for a comparison whose
+    // strings are single-quoted, or a dependency's suggested string with the new quotes).
     let within = |rs: &[Range<usize>], x: &Range<usize>| {
         rs.iter().any(|r| r.start <= x.start && x.end <= r.end)
     };
+    let key = |v: &Violation, replaced: &[Range<usize>]| {
+        let quotes = replaced
+            .iter()
+            .any(|r| within(std::slice::from_ref(&v.span), r));
+        (v.rule, (!quotes).then(|| v.message.clone()))
+    };
+    let replaced: Vec<Range<usize>> = edits
+        .iter()
+        .filter(|e| !e.with.is_empty())
+        .map(|e| e.range.clone())
+        .collect();
     let mut want: Vec<_> = keep
         .iter()
         .filter(|v| {
             !within(&removed, &v.span)
                 && !v.fix.as_ref().is_some_and(|e| within(&removed, &e.range))
         })
-        .map(key)
+        .map(|v| key(v, &replaced))
         .collect();
     let new: Vec<Range<usize>> = inserted.iter().filter(|r| !r.is_empty()).cloned().collect();
     let mut vs = lint_file(path, out).map_err(|_| "the fixed file would not parse")?;
@@ -238,7 +250,7 @@ fn check(
     let mut got: Vec<_> = vs
         .iter()
         .filter(|v| !auto(v) && !within(&new, &v.span))
-        .map(key)
+        .map(|v| key(v, &new))
         .collect();
     want.sort();
     got.sort();
@@ -384,16 +396,25 @@ mod tests {
 
     #[test]
     fn removes_groovy24_empty_elements() {
-        let src = "foo(a,,b)\ndef l = ['off', , 'heat']\ndef m = [a: 1,, b: 2]\nfoo(a,,, b)\nfoo(a, /* x */ , b)\nfoo(a,\n  ,\n  b)\n";
+        let src = "foo(a,,b)\ndef l = ['off', , 'heat']\ndef m = [a: 1,, b: 2]\nfoo(a, /* x */ , b)\nfoo(a,\n  ,\n  b)\nfoo(a,,b,c) { it }\n";
         assert_eq!(
             text(src),
-            "foo(a,b)\ndef l = ['off', 'heat']\ndef m = [a: 1, b: 2]\nfoo(a, b)\nfoo(a, /* x */  b)\nfoo(a,\n  b)\n"
+            "foo(a,b)\ndef l = ['off', 'heat']\ndef m = [a: 1, b: 2]\nfoo(a, /* x */  b)\nfoo(a,\n  b)\nfoo(a,b,c) { it }\n"
         );
         assert_eq!(fixed(&text(src)), Fix::Nothing, "idempotent");
-        // a single trailing comma is not an empty element
-        for src in ["foo(a, b)\n", "def l = [a, b,]\n"] {
+        // Groovy 2.4 rejects a second empty element, or one with a trailing comma, so that
+        // code compiled nowhere and is only reported; a trailing comma alone is fine
+        for src in [
+            "foo(a,,, b)\n",
+            "foo(a,,b,,c)\n",
+            "def l = [1,,2,]\n",
+            "foo(a,,b,)\n",
+            "foo(a, b,)\n",
+            "def l = [a, b,]\n",
+        ] {
             assert_eq!(fixed(src), Fix::Nothing, "{src:?}");
         }
+        assert!(lint("foo(a,,b,)\n").unwrap()[0].rule == "Groovy24EmptyElement");
     }
 
     #[test]
@@ -414,6 +435,8 @@ def d = ''
 "#
         );
         assert_eq!(fixed(&text(src)), Fix::Nothing, "idempotent");
+        // a report whose message quotes the strings (ComparisonOfTwoConstants) stays
+        assert_eq!(text("x = \"a\" == \"b\"\n"), "x = 'a' == 'b'\n");
         // something to interpolate, a quote, or a `\u` escape (read before the quotes)
         for src in [
             r#"def a = "$x""#,

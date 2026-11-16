@@ -1177,39 +1177,45 @@ fn double_negative(src: &str, n: Node, v: &mut Vec<Violation>) {
 }
 
 /// Groovy24EmptyElement: `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`, reported at each comma
-/// that follows another one. The fix removes that comma, with the whitespace before it back
-/// to the other comma (only the comma when a comment is between): Groovy 2.4 drops the empty
-/// element, so the call, list or map is the same without it.
+/// that follows another one. Groovy 2.4 drops one empty element, but rejects a second one,
+/// or one with a trailing comma (`[1,,2,]`), as Groovy 3 and later reject them all. So when
+/// it is the only one, without a trailing comma, the fix removes that comma, with the
+/// whitespace before it back to the other comma (only the comma when a comment is between):
+/// the call, list or map Groovy 2.4 compiled. Code that compiled nowhere isn't fixed.
 fn empty_element(src: &str, n: Node, v: &mut Vec<Violation>) {
     let what = match n.kind() {
         "argument_list" => "argument",
         "list_literal" => "list element",
         _ => "map entry",
     };
-    let mut comma: Option<Node> = None;
-    for k in n.children(&mut n.walk()) {
-        if k.kind().contains("comment") {
-            continue;
-        }
-        if let Some(c) = comma.filter(|_| k.kind() == ",") {
-            let start = if src[c.end_byte()..k.start_byte()].trim().is_empty() {
-                c.end_byte()
-            } else {
-                k.start_byte()
-            };
-            v.push(Violation {
-                fix: Some(super::Edit {
-                    range: start..k.end_byte(),
-                    with: String::new(),
-                }),
-                ..at(
-                    k,
-                    "Groovy24EmptyElement",
-                    format!("An empty {what}: Groovy 2.4 drops it and Groovy 3 and later reject it; remove the extra comma"),
-                )
-            });
-        }
-        comma = (k.kind() == ",").then_some(k);
+    let kids: Vec<Node> = n
+        .children(&mut n.walk())
+        .filter(|k| !k.kind().contains("comment"))
+        .collect();
+    let extra: Vec<(Node, Node)> = kids
+        .windows(2)
+        .filter(|w| w[0].kind() == "," && w[1].kind() == ",")
+        .map(|w| (w[0], w[1]))
+        .collect();
+    let trailing = kids.len() >= 2 && kids[kids.len() - 2].kind() == ",";
+    let fixable = extra.len() == 1 && !trailing;
+    for &(c, k) in &extra {
+        let start = if src[c.end_byte()..k.start_byte()].trim().is_empty() {
+            c.end_byte()
+        } else {
+            k.start_byte()
+        };
+        v.push(Violation {
+            fix: fixable.then(|| super::Edit {
+                range: start..k.end_byte(),
+                with: String::new(),
+            }),
+            ..at(
+                k,
+                "Groovy24EmptyElement",
+                format!("An empty {what}: Groovy 2.4 drops it and Groovy 3 and later reject it; remove the extra comma"),
+            )
+        });
     }
 }
 
