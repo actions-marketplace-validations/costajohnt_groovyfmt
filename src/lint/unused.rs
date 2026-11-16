@@ -10,7 +10,7 @@
 use super::basic::{annotations, has_modifier, is_method};
 use super::{Violation, at, words};
 use crate::text;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 /// The node kinds `check` looks at: declarations and scopes.
@@ -225,10 +225,27 @@ pub(super) fn check(
     let mut decls = Vec::new();
     let mut scopes: Vec<usize> = Vec::new();
     let mut scope_of = HashMap::new();
+    // the last statement of each method (not `void`), closure and lambda body: its value is
+    // the one returned
+    let mut returned = HashSet::new();
     for n in nodes.iter().copied() {
         while scopes.last().is_some_and(|&end| end <= n.start_byte()) {
             scopes.pop();
         }
+        let body = match n.kind() {
+            "method_declaration" | "constructor_declaration"
+                if (n.kind() == "method_declaration" || is_method(src, n))
+                    && n
+                        .child_by_field_name("return_type")
+                        .is_none_or(|t| text(t, src) != "void") =>
+            {
+                n.child_by_field_name("body")
+            }
+            "closure" => Some(n),
+            "lambda_expression" => n.child_by_field_name("body").filter(|b| b.kind() == "block"),
+            _ => None,
+        };
+        returned.extend(body.and_then(last_statement));
         match n.kind() {
             "field_declaration" | "method_declaration" => decls.push(n),
             "constructor_declaration" if is_method(src, n) => decls.push(n),
@@ -335,7 +352,7 @@ pub(super) fn check(
             }
             _ => {
                 if let Some(&Some(end)) = scope_of.get(&d.id()) {
-                    local(src, &idx, d, end, v)
+                    local(src, &idx, d, end, returned.contains(&d.id()), v)
                 }
             }
         }
@@ -436,16 +453,29 @@ fn declarators<'a>(src: &'a str, d: Node<'a>) -> Vec<(&'a str, Node<'a>)> {
 /// is Spock's `E e = thrown()`; so are tuple declarations
 /// (`def (a, b) = f()`), where an unused part is usually deliberate, and a script's
 /// top-level variables, which snippets and `evaluate`d scripts leave for the reader.
+/// `returned`: `d` is the last statement of a method or closure, so the value of its last
+/// declarator is the return value (`Foo getFoo() { Foo foo = lookup() }`), and removing it
+/// would change what is returned.
 fn local(
     src: &str,
     idx: &HashMap<String, Vec<usize>>,
     d: Node,
     end: usize,
+    returned: bool,
     v: &mut Vec<Violation>,
 ) {
-    for (name, n) in declarators(src, d) {
+    let names = declarators(src, d);
+    let count = names.len();
+    for (i, (name, n)) in names.into_iter().enumerate() {
         // `ignored` says it on purpose, as for EmptyCatchBlock
         if matches!(name, "_" | "ignore" | "ignored") {
+            continue;
+        }
+        if returned
+            && i + 1 == count
+            && n.parent()
+                .is_some_and(|p| p.child_by_field_name("value").is_some())
+        {
             continue;
         }
         if uses(idx, name, n.end_byte()..end, usize::MAX) == 0 && !spock_thrown(src, n) {
@@ -456,6 +486,15 @@ fn local(
             ));
         }
     }
+}
+
+/// The id of the last statement of a body, comments aside.
+fn last_statement(body: Node) -> Option<usize> {
+    let mut c = body.walk();
+    body.named_children(&mut c)
+        .filter(|s| !s.is_extra())
+        .last()
+        .map(|s| s.id())
 }
 
 /// Spock's `IOException e = thrown()`: the declared type is the exception expected, so the
@@ -571,6 +610,15 @@ mod tests {
             ),
             vec![] as Vec<usize>
         );
+    }
+
+    #[test]
+    fn a_declaration_that_is_the_return_value_is_not_reported() {
+        // the last statement of a method that returns a value, or of a closure, is returned
+        let src = "class A {\n  private Foo getFoo() {\n    Foo foo = lookup()\n  }\n  def f() {\n    def x = 1\n  }\n  int g() {\n    int d = 3 // the result\n  }\n  void v() {\n    String a = 'x'\n  }\n  def h() {\n    def y = 1\n    g()\n  }\n  def k() {\n    def p = 1, q = 2\n  }\n  A() {\n    def z = 1\n  }\n}\ndef c = { ->\n  def b = 2\n}\ndef l = { x ->\n  def e = x\n  e + 1\n  def n = 1\n}\n";
+        // `void` methods, a constructor, a statement after it, the other names of the
+        // declaration
+        assert_eq!(rules(src, "UnusedVariable"), vec![12, 15, 19, 22]);
     }
 
     #[test]
