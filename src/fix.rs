@@ -6,8 +6,10 @@
 //! must have the input's shape (so a removed `;` can't join two statements, or make a
 //! statement another's body, and a rewritten statement can't take in its neighbor); and
 //! linting it must find the input's other violations and nothing new. Otherwise the file is
-//! left as it was. One fix can expose another (`a();;`), and of two overlapping edits only
-//! the first is made in a round, so this runs a few rounds.
+//! left as it was. A rewritten dependency must also parse as the same call. One fix can
+//! expose another (`a();;`), and of two overlapping edits only the first is made in a round,
+//! so this runs rounds until one finds nothing to fix. A fix failing the checks on its own is
+//! dropped, its report left standing, and the others are made without it.
 
 use crate::lint::{Edit, Violation, lint_file};
 use std::ops::Range;
@@ -24,7 +26,12 @@ pub enum Fix {
     Refused(&'static str),
 }
 
-const MAX_ROUNDS: usize = 6;
+/// Rounds before giving up on a file whose fixes keep exposing more: one per level of
+/// nesting (`task a << { task b << { } }`), and real files need a few.
+const MAX_ROUNDS: usize = 64;
+
+/// Rules whose fix rewrites a dependency statement, which must parse as the same call.
+const CALL_REWRITES: &[&str] = &["GradleDependencyParentheses", "GradleDependencyTuple"];
 
 /// Fix the violations of `src`, the text of `path` (which decides the Jenkins, Gradle and
 /// Spock rules), that have a fix and that `wanted` (a rule enabled in the config, and not
@@ -38,7 +45,9 @@ pub fn fix(
 ) -> Fix {
     let mut text = src.to_string();
     let mut fixed = Vec::new();
-    for _ in 0..MAX_ROUNDS {
+    // why a fix was dropped, reported when no other fix is made
+    let mut dropped = None;
+    for n in 0..=MAX_ROUNDS {
         let Ok(mut vs) = lint_file(path, &text) else {
             return Fix::Refused("parse error");
         };
@@ -49,47 +58,100 @@ pub fn fix(
         if todo.is_empty() {
             break;
         }
-        let (edits, done) = edits(&todo);
-        let (out, inserted) = apply(&text, &edits);
-        let auto = |v: &Violation| v.fix.is_some() && wanted(v, &out);
-        if let Err(why) = check(path, &text, &out, &edits, &inserted, keep, compile, &auto) {
-            return Fix::Refused(why);
+        if n == MAX_ROUNDS {
+            return Fix::Refused("fixes still exposed more fixes after 64 rounds; nothing written");
         }
-        fixed.extend(
-            todo.into_iter()
-                .zip(done)
-                .filter(|(_, d)| *d)
-                .map(|(v, _)| v),
-        );
-        text = out;
+        match round(path, &text, todo, &keep, compile, &wanted, &mut dropped) {
+            Err(why) => return Fix::Refused(why),
+            Ok(None) => break,
+            Ok(Some((out, done))) => {
+                fixed.extend(done);
+                text = out;
+            }
+        }
     }
-    if fixed.is_empty() {
-        Fix::Nothing
-    } else {
-        Fix::Fixed(text, fixed)
+    match (fixed.is_empty(), dropped) {
+        (false, _) => Fix::Fixed(text, fixed),
+        (true, Some(why)) => Fix::Refused(why),
+        (true, None) => Fix::Nothing,
     }
 }
 
-/// The edits to make this round, sorted and none overlapping another, and for each
-/// violation whether this round fixes it: its edit is made, or lies in a range one made
-/// deletes (the `;` of a removed import line goes with the line). An edit overlapping one
-/// made otherwise waits for the next round, which lints the text again.
-fn edits(todo: &[Violation]) -> (Vec<Edit>, Vec<bool>) {
+/// One round: the text with `todo`'s edits made, and the violations that fixes. An edit that
+/// fails the checks on its own is dropped (`dropped` gets why, the first time), and the rest
+/// are tried again; `None` when all are dropped. An error when the edits fail together but
+/// none alone.
+fn round(
+    path: &Path,
+    text: &str,
+    mut todo: Vec<Violation>,
+    keep: &[Violation],
+    compile: Option<&str>,
+    wanted: &impl Fn(&Violation, &str) -> bool,
+    dropped: &mut Option<&'static str>,
+) -> Result<Option<(String, Vec<Violation>)>, &'static str> {
+    let attempt = |es: &[Edit], calls: &[bool]| {
+        let (out, inserted) = apply(text, es);
+        let auto = |v: &Violation| v.fix.is_some() && wanted(v, &out);
+        check(path, text, &out, es, &inserted, calls, keep, compile, &auto).map(|()| out)
+    };
+    while !todo.is_empty() {
+        let (made, done) = edits(&todo);
+        let es: Vec<Edit> = made.iter().filter_map(|&i| todo[i].fix.clone()).collect();
+        let calls: Vec<bool> = made
+            .iter()
+            .map(|&i| CALL_REWRITES.contains(&todo[i].rule))
+            .collect();
+        match attempt(&es, &calls) {
+            Ok(out) => {
+                let done = todo
+                    .into_iter()
+                    .zip(done)
+                    .filter(|(_, d)| *d)
+                    .map(|(v, _)| v)
+                    .collect();
+                return Ok(Some((out, done)));
+            }
+            Err(why) => {
+                let bad: Vec<usize> = (0..es.len())
+                    .filter(|&k| attempt(&es[k..=k], &calls[k..=k]).is_err())
+                    .map(|k| made[k])
+                    .collect();
+                if bad.is_empty() {
+                    return Err(why);
+                }
+                dropped.get_or_insert(why);
+                let mut i = 0;
+                todo.retain(|_| {
+                    i += 1;
+                    !bad.contains(&(i - 1))
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The violations whose edits to make this round (sorted, none overlapping another), and
+/// for each violation whether this round fixes it: its edit is made, or lies in a range one
+/// made deletes (the `;` of a removed import line goes with the line). An edit overlapping
+/// one made otherwise waits for the next round, which lints the text again.
+fn edits(todo: &[Violation]) -> (Vec<usize>, Vec<bool>) {
     let mut order: Vec<usize> = (0..todo.len()).collect();
     let range = |i: usize| todo[i].fix.as_ref().map_or(0..0, |e| e.range.clone());
     order.sort_by_key(|&i| (range(i).start, std::cmp::Reverse(range(i).end)));
-    let mut out: Vec<Edit> = Vec::new();
+    let mut out: Vec<usize> = Vec::new();
     let mut done = vec![false; todo.len()];
     for i in order {
-        let Some(e) = todo[i].fix.clone() else {
+        let Some(e) = &todo[i].fix else {
             continue;
         };
-        match out.last() {
+        match out.last().and_then(|&l| todo[l].fix.as_ref()) {
             Some(last) if e.range.start < last.range.end => {
                 done[i] = last.with.is_empty() && e.range.end <= last.range.end;
             }
             _ => {
-                out.push(e);
+                out.push(i);
                 done[i] = true;
             }
         }
@@ -118,6 +180,7 @@ fn inside(n: Node, removed: &[Range<usize>]) -> bool {
         .any(|r| r.start <= n.start_byte() && n.end_byte() <= r.end)
 }
 
+/// `calls` says which edits rewrite a dependency statement (`CALL_REWRITES`).
 #[allow(clippy::too_many_arguments)] // the two texts and the edits between them
 fn check(
     path: &Path,
@@ -125,7 +188,8 @@ fn check(
     out: &str,
     edits: &[Edit],
     inserted: &[Range<usize>],
-    keep: Vec<Violation>,
+    calls: &[bool],
+    keep: &[Violation],
     compile: Option<&str>,
     auto: &impl Fn(&Violation) -> bool,
 ) -> Result<(), &'static str> {
@@ -133,6 +197,12 @@ fn check(
     let (before, after) = (crate::parse(src), crate::parse(out));
     if after.root_node().has_error() {
         return Err("the fixed file would not parse");
+    }
+    let (b, a) = (before.root_node(), after.root_node());
+    for ((e, ins), _) in edits.iter().zip(inserted).zip(calls).filter(|(_, c)| **c) {
+        if !crate::lint::same_call(src, b, &e.range, out, a, ins) {
+            return Err("a rewritten dependency would parse as a different call");
+        }
     }
     if leaves(src, &before, &removed) != leaves(out, &after, inserted) {
         return Err("tokens other than the edited ones would change");
@@ -380,7 +450,8 @@ mod tests {
                 "while (x)\na()\n",
                 &[del(9..10)],
                 &[9..9],
-                Vec::new(),
+                &[],
+                &[],
                 None,
                 &|_| true
             ),
@@ -394,7 +465,8 @@ mod tests {
                 "x = 2\n",
                 &[del(5..6)],
                 &[5..5],
-                Vec::new(),
+                &[],
+                &[],
                 None,
                 &|_| true
             )
@@ -407,7 +479,8 @@ mod tests {
                 "x = 1\n",
                 &[del(5..6)],
                 &[5..5],
-                Vec::new(),
+                &[],
+                &[],
                 None,
                 &|_| true
             )
@@ -420,11 +493,117 @@ mod tests {
                 "x = 1\ny = 2 +\n",
                 &[del(5..6)],
                 &[5..5],
-                Vec::new(),
+                &[],
+                &[],
                 None,
                 &|_| true
             ),
             Err("the fixed file would not parse")
+        );
+    }
+
+    #[test]
+    fn the_checks_reject_a_dependency_that_parses_as_another_call() {
+        // what dropping the parentheses would do to these: index a property, call a method on
+        // the result, read a property of a list
+        for (arg, plain) in [
+            ("[0, 1].first()", " [0, 1].first()"),
+            ("('x').toUpperCase()", " ('x').toUpperCase()"),
+            ("['a:b:1'].size", " ['a:b:1'].size"),
+        ] {
+            let src = format!("dependencies {{\n    implementation({arg})\n}}\n");
+            let out = format!("dependencies {{\n    implementation{plain}\n}}\n");
+            let range = 19..src.len() - 3;
+            let edit = Edit {
+                range: range.clone(),
+                with: out[19..out.len() - 3].to_string(),
+            };
+            let ins = 19..out.len() - 3;
+            let run = |calls: &[bool]| {
+                check(
+                    Path::new("build.gradle"),
+                    &src,
+                    &out,
+                    std::slice::from_ref(&edit),
+                    std::slice::from_ref(&ins),
+                    calls,
+                    &[],
+                    None,
+                    &|_| true,
+                )
+            };
+            assert_eq!(
+                run(&[true]),
+                Err("a rewritten dependency would parse as a different call"),
+                "{arg}"
+            );
+        }
+        // the same call, and map notation become a string, pass
+        for (src, out) in [
+            (
+                "dependencies {\n    api(project(':x'))\n}\n",
+                "dependencies {\n    api project(':x')\n}\n",
+            ),
+            (
+                "dependencies {\n    api group: 'a', name: 'b'\n}\n",
+                "dependencies {\n    api 'a:b'\n}\n",
+            ),
+        ] {
+            let edit = Edit {
+                range: 19..src.len() - 3,
+                with: out[19..out.len() - 3].to_string(),
+            };
+            let ins = 19..out.len() - 3;
+            assert_eq!(
+                check(
+                    Path::new("build.gradle"),
+                    src,
+                    out,
+                    &[edit],
+                    &[ins],
+                    &[true],
+                    &[],
+                    None,
+                    &|_| true
+                ),
+                Ok(()),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fix_failing_the_checks_is_dropped_and_the_others_made() {
+        let path = Path::new("build.gradle");
+        let src = "apply plugin: 'java'\ndependencies {\n    implementation([0, 1].first())\n    testCompile 'a:b:1'\n}\n";
+        let mut todo: Vec<Violation> = lint_file(path, src)
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.fix.is_some())
+            .collect();
+        assert_eq!(todo.len(), 1, "{todo:?}");
+        // a parentheses fix the rule no longer offers for this argument
+        let at = src.find("implementation(").unwrap();
+        let end = src.find(")\n").unwrap() + 1;
+        todo.push(Violation {
+            rule: "GradleDependencyParentheses",
+            fix: Some(Edit {
+                range: at..end,
+                with: "implementation [0, 1].first()".into(),
+            }),
+            span: at..end,
+            ..lint_file(path, src).unwrap().remove(0)
+        });
+        let mut dropped = None;
+        let all = |_: &Violation, _: &str| true;
+        let Ok(Some((out, done))) = round(path, src, todo, &[], None, &all, &mut dropped) else {
+            panic!()
+        };
+        assert_eq!(out, src.replace("testCompile", "testImplementation"));
+        assert_eq!(done.len(), 1);
+        assert_eq!(
+            dropped,
+            Some("a rewritten dependency would parse as a different call")
         );
     }
 }

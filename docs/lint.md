@@ -193,14 +193,16 @@ These apply in classes whose superclass is `Specification` or ends in `Spec` or 
 
 - an `UnusedImport`, `DuplicateImport` or `ImportFromSamePackage` line is removed, with its line break, and only when nothing but whitespace or a `;` shares the line
 - an `UnnecessarySemicolon` `;` is removed
-- `GradleRemovedConfiguration`: `testCompile` becomes `testImplementation`, `runtime` becomes `runtimeOnly` and `testRuntime` becomes `testRuntimeOnly`. `compile` becomes `implementation` for most builds but `api` for a dependency a library's own API exposes, which only the build's author knows, so it is fixed only when the config's `[lint]` table names the replacement: `gradle_compile_replacement = "implementation"` (or `"api"`). Without it the report stays, and its message says so
+- `GradleRemovedConfiguration`: `testCompile` becomes `testImplementation`, `runtime` becomes `runtimeOnly` and `testRuntime` becomes `testRuntimeOnly`. `compile` becomes `implementation` for most builds but `api` for a dependency a library's own API exposes, which only the build's author knows, so it is fixed only when the config's `[lint]` table names the replacement: `gradle_compile_replacement = "implementation"` (or `"api"`). Without it the report stays, and its message says so. A rename is fixed only in a file that applies a Java plugin (`java`, `java-library`, `groovy`, `scala`, `application`, `war`, `java-gradle-plugin` or Kotlin JVM, by `apply plugin:` or in `plugins { }`), which makes the new configurations; a file whose plugins come from a parent's `allprojects` or a convention plugin is only reported, and the message says why. `api` comes only with `java-library`, so `compile` becomes `api` only in a file that applies it
 - `GradleJcenter`: a plain `jcenter()` line in a `repositories { }` block becomes `mavenCentral()`, or is removed when the block already has a plain `mavenCentral()`. `jcenter { ... }` is left as it is
-- `GradleLeftShiftTask`: `task name << { ... }` becomes `task name { doLast { ... } }`, the action kept as written (`task 'name' << { }` is left as it is)
+- `GradleLeftShiftTask`: `task name << { ... }` becomes `task name { doLast { ... } }`, the action kept as written (`task 'name' << { }` is left as it is, as is one with a comment between `<<` and `{` or a line break in it)
 - `GradleSpaceAssignment`: `name value` becomes `name = value`
 - `GradleDependencyTuple`: the map becomes the string, `implementation 'a:b:1'`, with the values' quotes
-- `GradleDependencyParentheses`: the parentheses go, `implementation 'a:b:1'`
+- `GradleDependencyParentheses`: the parentheses go, `implementation 'a:b:1'`. It is reported only when each argument starts with a letter, `_` or a quote, and the fixed statement must parse as the same call with the same arguments: without parentheses, `implementation [0, 1].first()` would index a property
 
-A Gradle fix is made only where its report fires, so the wrapper version still decides: a build pinned to a Gradle that still has `testCompile` is left alone, as is a configuration the build declares itself.
+A Gradle fix is made only where its report fires, so the wrapper version still decides: a build pinned to a Gradle that still has `testCompile` is left alone, as is a configuration the build declares itself (`configurations { runtime }`, `create('runtime')`, `register('runtime')` and the like in that block).
+
+A fix that fails the checks is dropped and its report stays; the file's other fixes are still made. Fixing repeats until a pass finds nothing more to fix (one pass per level of nested fixes), up to 64 passes.
 
 An import from the file's own package is removed only when the file declares no class of the same name. An `UnnecessaryGroovyImport` is never removed, since it can be what beats a same-named class in the package, which one file can't show.
 

@@ -3612,8 +3612,10 @@ fn import_codenarc_arguments_and_exit_status() {
 #[test]
 fn gradle_compile_is_fixed_only_with_its_replacement_configured() {
     let d = Dir::new("gradle-compile");
-    let src = "dependencies {\n    compile 'a:b:1'\n    testCompile 'a:b:1'\n}\n";
-    d.write("build.gradle", src);
+    let plugins = "plugins {\n    id 'java-library'\n}\n";
+    let src =
+        format!("{plugins}dependencies {{\n    compile 'a:b:1'\n    testCompile 'a:b:1'\n}}\n");
+    d.write("build.gradle", &src);
     let l = run(&d.0, &["--lint", "build.gradle"], None);
     let out = stdout(&l);
     assert!(out.contains("`compile` configuration was removed in Gradle 7.0; use implementation (or api for dependencies your API exposes); --fix replaces it once `gradle_compile_replacement` is set under [lint]\n"), "{out}");
@@ -3621,18 +3623,36 @@ fn gradle_compile_is_fixed_only_with_its_replacement_configured() {
     run(&d.0, &["--lint", "--fix", "build.gradle"], None);
     assert_eq!(
         d.read("build.gradle"),
-        "dependencies {\n    compile 'a:b:1'\n    testImplementation 'a:b:1'\n}\n"
+        format!(
+            "{plugins}dependencies {{\n    compile 'a:b:1'\n    testImplementation 'a:b:1'\n}}\n"
+        )
     );
     d.write(
         ".groovyfmt.toml",
         "[lint]\ngradle_compile_replacement = \"api\"\n",
     );
+    // the message names the configured replacement
     let l = run(&d.0, &["--lint", "build.gradle"], None);
-    assert!(stdout(&l).ends_with("[lint] (fixable)\n"), "{}", stdout(&l));
+    assert!(
+        stdout(&l).ends_with("configuration was removed in Gradle 7.0; use api (`gradle_compile_replacement`) (fixable)\n"),
+        "{}",
+        stdout(&l)
+    );
     let f = run(&d.0, &["--lint", "--fix", "build.gradle"], None);
     assert_eq!(f.status.code(), Some(0), "{}", stderr(&f));
     assert_eq!(
         d.read("build.gradle"),
-        "dependencies {\n    api 'a:b:1'\n    testImplementation 'a:b:1'\n}\n"
+        format!("{plugins}dependencies {{\n    api 'a:b:1'\n    testImplementation 'a:b:1'\n}}\n")
     );
+    // api without java-library: reported, saying why, and left alone
+    let src = "apply plugin: 'java'\ndependencies {\n    compile 'a:b:1'\n}\n";
+    d.write("build.gradle", src);
+    let l = run(&d.0, &["--lint", "build.gradle"], None);
+    assert!(
+        stdout(&l).contains("use api (`gradle_compile_replacement`) (not fixed: api needs the java-library plugin, which this file doesn't apply)\n"),
+        "{}",
+        stdout(&l)
+    );
+    run(&d.0, &["--lint", "--fix", "build.gradle"], None);
+    assert_eq!(d.read("build.gradle"), src);
 }

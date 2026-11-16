@@ -22,6 +22,26 @@ use tree_sitter::Node;
 /// Removed configuration, replacement. Each but `compile` has one replacement, which
 /// `--fix` makes; `compile`'s depends on whether the library's API exposes the dependency,
 /// so it is fixed only with `gradle_compile_replacement` set (`opt_in_compile`).
+/// Plugins that make the removed configurations' replacements (runtimeOnly,
+/// testImplementation, testRuntimeOnly, implementation): Java and the plugins that apply it.
+/// A rename is fixed only in a file that applies one; a file whose plugins come from a parent
+/// (`allprojects`, a convention plugin) may have none of the new names, so it's only reported.
+const JVM_PLUGINS: &[&str] = &[
+    "java",
+    "java-library",
+    "groovy",
+    "scala",
+    "application",
+    "war",
+    "java-gradle-plugin",
+    "kotlin",
+    "org.jetbrains.kotlin.jvm",
+];
+
+/// The message when a rename isn't fixed for want of a plugin from `JVM_PLUGINS`.
+const NO_JVM_PLUGIN: &str =
+    " (not fixed: this file applies no Java plugin, so the new configuration may not exist)";
+
 const REMOVED: &[(&str, &str)] = &[
     (
         "compile",
@@ -43,7 +63,9 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     let mut removed: Vec<(Node, String, u32)> = Vec::new();
     let mut conf_refs = Vec::new();
     let deprecated_space = std::cell::OnceCell::new();
+    let mut plugins = HashSet::new();
     crate::preorder(root, |n| {
+        plugins.extend(applied_plugin(src, n));
         removed_api(src, n, &mut removed, &mut conf_refs);
         if let Some(names) = property_scope(src, n)
             && !path
@@ -75,6 +97,13 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                 "dependencies" => deps.push(b),
                 "configurations" => {
                     for s in statements(b) {
+                        // create('runtime'), register('runtime') { }, ...
+                        if let Some(c) = call(s, src)
+                            && DECLARING.contains(&c.name)
+                            && let Some(name) = c.args.first().and_then(|a| constant_value(*a, src))
+                        {
+                            declared.insert(name);
+                        }
                         let t = text(s, src);
                         let end = t
                             .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
@@ -96,11 +125,13 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                 _ => {}
             }
         }
-        // configurations.create('compile'), maybeCreate, register
+        // configurations.create('compile'), maybeCreate, register, getByName, named
         if n.kind() == "method_invocation"
             && n.child_by_field_name("function").is_some_and(|f| {
                 let t = text(f, src);
-                t.ends_with(".create") || t.ends_with(".maybeCreate") || t.ends_with(".register")
+                DECLARING
+                    .iter()
+                    .any(|d| t.strip_suffix(d).is_some_and(|r| r.ends_with('.')))
             })
             && let Some(a) = n
                 .child_by_field_name("arguments")
@@ -113,6 +144,7 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     });
     // read only for a file that would get a report
     let old_gradle = std::cell::OnceCell::new();
+    let jvm = plugins.iter().any(|p| JVM_PLUGINS.contains(&p.as_str()));
     for b in deps {
         for s in statements(b) {
             let Some(c) = call(s, src) else { continue };
@@ -124,17 +156,25 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                 && !*old_gradle.get_or_init(|| wrapper_major(path).is_some_and(|m| m < 7))
             {
                 // the name starts the statement: `testCompile 'a'`, `testCompile('a') { }`
-                let fix = (c.name != "compile" && text(s, src).starts_with(c.name)).then(|| Edit {
-                    range: s.start_byte()..s.start_byte() + c.name.len(),
-                    with: new.to_string(),
-                });
+                let fix =
+                    (c.name != "compile" && jvm && text(s, src).starts_with(c.name)).then(|| {
+                        Edit {
+                            range: s.start_byte()..s.start_byte() + c.name.len(),
+                            with: new.to_string(),
+                        }
+                    });
+                let why = if c.name != "compile" && !jvm {
+                    NO_JVM_PLUGIN
+                } else {
+                    ""
+                };
                 v.push(Violation {
                     fix,
                     ..at(
                         s,
                         "GradleRemovedConfiguration",
                         format!(
-                            "The `{}` configuration was removed in Gradle 7.0; use {new}",
+                            "The `{}` configuration was removed in Gradle 7.0; use {new}{why}",
                             c.name
                         ),
                     )
@@ -290,26 +330,9 @@ fn removed_api<'a>(
     {
         conf_refs.push((n, text(f, src)));
     }
-    // apply plugin: 'maven', apply(plugin: 'maven')
-    if n.kind() == "named_argument"
-        && n.child_by_field_name("key")
-            .is_some_and(|k| text(k, src) == "plugin")
-        && let Some(val) = n.child_by_field_name("value")
-        && let Some(id) = constant_value(val, src).filter(|_| val.kind() == "string_literal")
+    // apply plugin: 'maven', apply(plugin: 'maven'), plugins { id 'maven' }
+    if let Some(id) = applied_plugin(src, n)
         && let Some((_, since, new)) = REMOVED_PLUGINS.iter().find(|p| p.0 == id)
-        && n.parent()
-            .and_then(|p| {
-                if p.kind() == "argument_list" {
-                    p.parent()
-                } else {
-                    Some(p)
-                }
-            })
-            .and_then(|p| {
-                p.child_by_field_name("receiver")
-                    .or_else(|| p.child_by_field_name("function"))
-            })
-            .is_some_and(|f| text(f, src) == "apply")
     {
         out.push((
             n,
@@ -345,20 +368,6 @@ fn removed_api<'a>(
         }
     }
     let Some(c) = call(n, src) else { return };
-    // plugins { id 'maven' }
-    if c.name == "id"
-        && let [a] = c.args.as_slice()
-        && a.kind() == "string_literal"
-        && let Some(id) = constant_value(*a, src)
-        && let Some((_, since, new)) = REMOVED_PLUGINS.iter().find(|p| p.0 == id)
-        && owners(n, src).next() == Some("plugins")
-    {
-        out.push((
-            n,
-            format!("The `{id}` plugin was removed in Gradle {since}.0; {new}"),
-            *since,
-        ));
-    }
     // a build may declare its own task of that name
     if c.name == "uploadArchives"
         && c.body.is_some()
@@ -377,6 +386,54 @@ fn removed_api<'a>(
         ));
     }
 }
+
+/// The plugin id `n` applies: `apply plugin: 'java'` or `apply(plugin: 'java')` (`n` is the
+/// named argument), or `id 'java'` in a `plugins { }` block (`n` is the statement; a
+/// `version` after the id is allowed).
+fn applied_plugin(src: &str, n: Node) -> Option<String> {
+    if n.kind() == "named_argument" {
+        let val = n.child_by_field_name("value")?;
+        let applies = n
+            .child_by_field_name("key")
+            .is_some_and(|k| text(k, src) == "plugin")
+            && val.kind() == "string_literal"
+            && n.parent()
+                .and_then(|p| {
+                    if p.kind() == "argument_list" {
+                        p.parent()
+                    } else {
+                        Some(p)
+                    }
+                })
+                .and_then(|p| {
+                    p.child_by_field_name("receiver")
+                        .or_else(|| p.child_by_field_name("function"))
+                })
+                .is_some_and(|f| text(f, src) == "apply");
+        return applies.then(|| constant_value(val, src)).flatten();
+    }
+    let c = call(n, src)?;
+    let a = c.args.first().filter(|a| {
+        c.name == "id"
+            && a.kind() == "string_literal"
+            && (c.args.len() == 1 || (c.args.len() == 3 && text(c.args[1], src) == "version"))
+    })?;
+    if owners(n, src).next() != Some("plugins") {
+        return None;
+    }
+    constant_value(*a, src)
+}
+
+/// Calls in a `configurations { }` block (or on `configurations.`) that make or name a
+/// configuration, which the build then has.
+const DECLARING: &[&str] = &[
+    "create",
+    "maybeCreate",
+    "register",
+    "getByName",
+    "named",
+    "findByName",
+];
 
 /// The names of the calls whose closures hold `n`, innermost first.
 fn owners<'a>(n: Node<'a>, src: &'a str) -> impl Iterator<Item = &'a str> {
@@ -583,7 +640,13 @@ fn left_shift(src: &str, n: Node, v: &mut Vec<Violation>) {
                 && l.child_by_field_name("function")
                     .is_some_and(|f| f.kind() == "identifier"))
     });
-    let fix = (n.kind() == "expression_statement" && named).then(|| Edit {
+    // only spaces between `<<` and `{`, and `task name <<` on one line: anything else (a
+    // comment, a line break) would be lost or moved
+    let plain = !src[n.start_byte()..op.start_byte()].contains('\n')
+        && src[op.end_byte()..body.start_byte()]
+            .chars()
+            .all(|ch| ch == ' ' || ch == '\t');
+    let fix = (n.kind() == "expression_statement" && named && plain).then(|| Edit {
         range: n.start_byte()..body.end_byte(),
         with: format!(
             "{}{{ doLast {} }}",
@@ -670,8 +733,10 @@ fn plain_list(src: &str, args: &[Node]) -> bool {
 
 /// GradleDependencyParentheses: `implementation('a:b:1')` with no closure after it. The
 /// arguments must read the same as a command's: a string, a name, a dotted name, a call
-/// without a closure or a named argument, all on one line. A `[`, `(` or `-` first would
-/// read as an index, a call or a subtraction.
+/// without a closure or a named argument, all on one line, each starting with a letter, `_`
+/// or a quote. Anything else first would read differently without the parentheses: `[`
+/// as an index (`implementation [0, 1].first()`), `(` as the call's own arguments, `-` as a
+/// subtraction, `/` as a division. `fix::check` also parses the result to be sure.
 fn parentheses(src: &str, c: &Call, v: &mut Vec<Violation>) {
     let Some(e) = c.node.named_child(0).filter(|e| {
         c.node.kind() == "expression_statement"
@@ -691,7 +756,8 @@ fn parentheses(src: &str, c: &Call, v: &mut Vec<Violation>) {
             "string_literal" | "identifier" | "field_access" | "named_argument" => true,
             "method_invocation" => a.child_by_field_name("closure").is_none(),
             _ => false,
-        })
+        } && text(*a, src)
+            .starts_with(|ch: char| ch.is_ascii_alphabetic() || matches!(ch, '_' | '\'' | '"')))
         && plain_list(src, &c.args)
         && src[list.start_byte() + 1..first.start_byte()]
             .trim()
@@ -889,22 +955,87 @@ fn space_assignment(
     v.push(x);
 }
 
-/// GradleRemovedConfiguration on `compile` gets a fix when the config names the
-/// replacement, `implementation` or `api` (`gradle_compile_replacement`).
+/// GradleRemovedConfiguration on `compile` names the replacement the config gives,
+/// `implementation` or `api` (`gradle_compile_replacement`), and gets a fix when the file
+/// applies a plugin that makes it: `api` only comes with java-library.
 pub(super) fn opt_in_compile(vs: &mut [Violation], src: &str, with: &str) {
+    let mut plugins = None;
     for x in vs {
         let rest = &src[x.span.start..];
-        if x.rule == "GradleRemovedConfiguration"
-            && x.fix.is_none()
-            && rest.starts_with("compile")
-            && !rest[7..].starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+        if x.rule != "GradleRemovedConfiguration"
+            || x.fix.is_some()
+            || !rest.starts_with("compile")
+            || rest[7..].starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
         {
+            continue;
+        }
+        let plugins = plugins.get_or_insert_with(|| {
+            let tree = crate::parse(src);
+            let mut ps = HashSet::new();
+            crate::preorder(tree.root_node(), |n| {
+                ps.extend(applied_plugin(src, n));
+                true
+            });
+            ps
+        });
+        let why = if !plugins.iter().any(|p| JVM_PLUGINS.contains(&p.as_str())) {
+            NO_JVM_PLUGIN
+        } else if with == "api" && !plugins.contains("java-library") {
+            " (not fixed: api needs the java-library plugin, which this file doesn't apply)"
+        } else {
             x.fix = Some(Edit {
                 range: x.span.start..x.span.start + 7,
                 with: with.to_string(),
             });
-        }
+            ""
+        };
+        x.message = format!(
+            "The `compile` configuration was removed in Gradle 7.0; use {with} (`gradle_compile_replacement`){why}"
+        );
     }
+}
+
+/// The call statement spanning exactly `r` (with an argument the grammar reads as the next
+/// statement, `api project(':x')`): its name, its arguments' kinds and texts, and its
+/// closure's text.
+type CallText<'a> = (&'a str, Vec<(&'a str, &'a str)>, Option<&'a str>);
+
+fn call_at<'a>(src: &'a str, root: Node<'a>, r: &std::ops::Range<usize>) -> Option<CallText<'a>> {
+    let n = root.descendant_for_byte_range(r.start, r.start + 1)?;
+    std::iter::successors(Some(n), |p| p.parent())
+        .take_while(|p| p.start_byte() == r.start && p.end_byte() <= r.end)
+        .filter_map(|p| call(p, src))
+        .find(|c| {
+            let ends = c.args.iter().chain(&c.body).map(|a| a.end_byte());
+            ends.chain([c.node.end_byte()]).max() == Some(r.end)
+        })
+        .map(|c| {
+            let args = c.args.iter().map(|a| (a.kind(), text(*a, src))).collect();
+            (c.name, args, c.body.map(|b| text(b, src)))
+        })
+}
+
+/// For `fix::check`, on a rewrite of a dependency (GradleDependencyParentheses,
+/// GradleDependencyTuple): `before[range]` of `src` and `after[ins]` of `out` parse as the
+/// same call, with the same name, closure and arguments, or with map notation become one
+/// string. Without the parentheses, `implementation [0, 1].first()` indexes a property and
+/// `implementation ('x').toUpperCase()` calls a method on the result.
+pub(crate) fn same_call(
+    src: &str,
+    before: Node,
+    range: &std::ops::Range<usize>,
+    out: &str,
+    after: Node,
+    ins: &std::ops::Range<usize>,
+) -> bool {
+    let (Some(old), Some(new)) = (call_at(src, before, range), call_at(out, after, ins)) else {
+        return false;
+    };
+    old.0 == new.0
+        && old.2 == new.2
+        && (old.1 == new.1
+            || (old.1.iter().all(|a| a.0 == "named_argument")
+                && matches!(new.1.as_slice(), [("string_literal", _)])))
 }
 
 #[cfg(test)]
@@ -1186,11 +1317,11 @@ mod tests {
 
     #[test]
     fn fixes_several_reports_at_once() {
-        let src = "group 'a'\nrepositories {\n    jcenter()\n}\nbuildscript {\n    repositories {\n        jcenter()\n        mavenCentral()\n    }\n    dependencies {\n        classpath group: 'a', name: 'b', version: '1'\n    }\n}\ndependencies {\n    testCompile('junit:junit:4.12')\n    runtime group: 'a', name: 'b', version: '1.+'\n    testRuntime project(':x')\n    compile 'a:b:1'\n}\ntask hello << {\n    println 'hi'\n}\ntask copy(type: Copy) << { }\ntask 'quoted' << { }\ntask docs {\n    description 'x'\n}\n";
+        let src = "apply plugin: 'java-library'\ngroup 'a'\nrepositories {\n    jcenter()\n}\nbuildscript {\n    repositories {\n        jcenter()\n        mavenCentral()\n    }\n    dependencies {\n        classpath group: 'a', name: 'b', version: '1'\n    }\n}\ndependencies {\n    testCompile('junit:junit:4.12')\n    runtime group: 'a', name: 'b', version: '1.+'\n    testRuntime project(':x')\n    compile 'a:b:1'\n}\ntask hello << {\n    println 'hi'\n}\ntask copy(type: Copy) << { }\ntask 'quoted' << { }\ntask docs {\n    description 'x'\n}\n";
         let out = fixed("build.gradle", None, src);
         assert_eq!(
             out,
-            "group = 'a'\nrepositories {\n    mavenCentral()\n}\nbuildscript {\n    repositories {\n        mavenCentral()\n    }\n    dependencies {\n        classpath group: 'a', name: 'b', version: '1'\n    }\n}\ndependencies {\n    testImplementation('junit:junit:4.12')\n    runtimeOnly group: 'a', name: 'b', version: '1.+'\n    testRuntimeOnly project(':x')\n    compile 'a:b:1'\n}\ntask hello { doLast {\n    println 'hi'\n} }\ntask copy(type: Copy) { doLast { } }\ntask 'quoted' << { }\ntask docs {\n    description = 'x'\n}\n"
+            "apply plugin: 'java-library'\ngroup = 'a'\nrepositories {\n    mavenCentral()\n}\nbuildscript {\n    repositories {\n        mavenCentral()\n    }\n    dependencies {\n        classpath group: 'a', name: 'b', version: '1'\n    }\n}\ndependencies {\n    testImplementation('junit:junit:4.12')\n    runtimeOnly group: 'a', name: 'b', version: '1.+'\n    testRuntimeOnly project(':x')\n    compile 'a:b:1'\n}\ntask hello { doLast {\n    println 'hi'\n} }\ntask copy(type: Copy) { doLast { } }\ntask 'quoted' << { }\ntask docs {\n    description = 'x'\n}\n"
         );
         // of the rules on by default, what's left: `compile` (no replacement configured) and
         // the quoted task
@@ -1244,16 +1375,16 @@ mod tests {
     #[test]
     fn fixed_dependency_notation_parses_as_the_same_call() {
         use crate::lint::jenkins::call;
-        let src = "dependencies {\n    implementation('a:b:1', libs.foo)\n    api(project(':x'))\n    runtimeOnly(name: 'b', group: 'a') { transitive = false }\n}\n";
+        let src = "apply plugin: 'java'\ndependencies {\n    implementation('a:b:1', libs.foo)\n    api(project(':x'))\n    runtimeOnly(name: 'b', group: 'a') { transitive = false }\n}\n";
         let out = fixed_with("build.gradle", None, true, src);
         assert_eq!(
             out,
-            "dependencies {\n    implementation 'a:b:1', libs.foo\n    api project(':x')\n    runtimeOnly('a:b') { transitive = false }\n}\n"
+            "apply plugin: 'java'\ndependencies {\n    implementation 'a:b:1', libs.foo\n    api project(':x')\n    runtimeOnly('a:b') { transitive = false }\n}\n"
         );
         let tree = crate::parse(&out);
         let body = tree
             .root_node()
-            .named_child(0)
+            .named_child(1)
             .and_then(|d| call(d, &out))
             .and_then(|c| c.body)
             .unwrap();
@@ -1280,5 +1411,175 @@ mod tests {
                 ("runtimeOnly".into(), vec!["'a:b'".into()]),
             ]
         );
+    }
+
+    #[test]
+    fn parentheses_whose_removal_changes_the_call_are_not_reported() {
+        // without the parentheses: a property indexed, a method called on the result, a
+        // division, a dollar-slashy string's `$`
+        for arg in [
+            "[0, 1].first()",
+            "('x').toUpperCase()",
+            "['a:b:1'].size",
+            "/a:b:1/",
+            "$/a:b:1/$",
+            "-x",
+            "(x)",
+            "!x",
+            "~/a/",
+            "*xs",
+        ] {
+            let src = format!(
+                "apply plugin: 'java'\ndependencies {{\n    implementation({arg})\n    testCompile 'a:b:1'\n}}\n"
+            );
+            assert_eq!(
+                rules("build.gradle", &src),
+                vec![("GradleRemovedConfiguration", 4)],
+                "{arg}"
+            );
+            // the line after is still fixed
+            assert_eq!(
+                fixed_with("build.gradle", None, true, &src),
+                src.replace("testCompile", "testImplementation"),
+                "{arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn configurations_the_build_makes_are_not_renamed() {
+        for decl in [
+            "configurations {\n    create(\"runtime\")\n    register(\"testRuntime\")\n}\n",
+            "configurations {\n    maybeCreate 'runtime'\n    getByName('testRuntime') { }\n}\n",
+            "configurations {\n    named('runtime')\n    findByName('testRuntime')\n}\n",
+            "configurations {\n    runtime\n    testRuntime { transitive = false }\n}\n",
+            "configurations {\n    runtime.extendsFrom x\n    y.extendsFrom testRuntime\n}\n",
+            "configurations.register('runtime')\nconfigurations.getByName('testRuntime')\n",
+        ] {
+            let src = format!(
+                "apply plugin: 'java'\n{decl}dependencies {{\n    runtime \"a:b:1\"\n    testRuntime \"a:b:1\"\n}}\n"
+            );
+            assert_eq!(rules("build.gradle", &src), vec![], "{decl}");
+            assert_eq!(fixed("build.gradle", None, &src), src, "{decl}");
+        }
+    }
+
+    #[test]
+    fn renames_are_fixed_only_under_a_java_plugin() {
+        let deps = "dependencies {\n    testCompile 'a:b:1'\n    compile 'a:b:1'\n}\n";
+        for plugin in [
+            "apply plugin: 'java'\n",
+            "apply(plugin: 'groovy')\n",
+            "allprojects { apply plugin: 'war' }\n",
+            "plugins {\n    id 'java-library'\n}\n",
+            "plugins {\n    id('application')\n}\n",
+            "plugins {\n    id 'org.jetbrains.kotlin.jvm' version '1.9.0'\n}\n",
+        ] {
+            let src = format!("{plugin}{deps}");
+            assert_eq!(
+                fixed("build.gradle", Some("implementation"), &src),
+                src.replace("testCompile", "testImplementation")
+                    .replace("compile '", "implementation '"),
+                "{plugin}"
+            );
+        }
+        // none in the file (a parent's allprojects, a convention plugin), or not a Java one:
+        // reported, saying why, and left alone
+        for plugin in [
+            "",
+            "apply plugin: 'base'\n",
+            "plugins {\n    id 'com.example.java-conventions'\n}\n",
+            "dependencies { id 'java' }\n",
+        ] {
+            let src = format!("{plugin}{deps}");
+            let vs = lint_file(Path::new("build.gradle"), &src).unwrap();
+            let mut vs: Vec<_> = vs
+                .into_iter()
+                .filter(|v| v.rule == "GradleRemovedConfiguration")
+                .collect();
+            crate::lint::opt_in_fixes(&mut vs, &src, Some("implementation"));
+            assert_eq!(vs.len(), 2, "{plugin}");
+            assert!(
+                vs.iter().all(|v| v.fix.is_none()
+                    && v.message.ends_with("(not fixed: this file applies no Java plugin, so the new configuration may not exist)")),
+                "{plugin}: {vs:?}"
+            );
+            assert_eq!(fixed("build.gradle", Some("implementation"), &src), src);
+        }
+    }
+
+    #[test]
+    fn compile_becomes_api_only_under_java_library() {
+        let deps = "dependencies {\n    compile 'a:b:1'\n}\n";
+        for plugin in [
+            "apply plugin: 'java'\n",
+            "plugins {\n    id 'application'\n}\n",
+        ] {
+            let src = format!("{plugin}{deps}");
+            let mut vs = lint_file(Path::new("build.gradle"), &src).unwrap();
+            crate::lint::opt_in_fixes(&mut vs, &src, Some("api"));
+            assert_eq!(
+                vs[0].message,
+                "The `compile` configuration was removed in Gradle 7.0; use api (`gradle_compile_replacement`) (not fixed: api needs the java-library plugin, which this file doesn't apply)"
+            );
+            assert_eq!(vs[0].fix, None);
+            assert_eq!(fixed("build.gradle", Some("api"), &src), src);
+            // implementation needs only java
+            assert_eq!(
+                fixed("build.gradle", Some("implementation"), &src),
+                src.replace("compile", "implementation")
+            );
+        }
+        let src = format!("apply plugin: 'java'\napply plugin: 'java-library'\n{deps}");
+        assert_eq!(
+            fixed("build.gradle", Some("api"), &src),
+            src.replace("compile", "api")
+        );
+    }
+
+    #[test]
+    fn left_shift_is_fixed_only_with_nothing_between_its_parts() {
+        // a comment between `<<` and `{`, or a line break anywhere, would be lost or moved
+        for src in [
+            "task g << /* keep me */ { println 'g' }\n",
+            "task h << // note\n{ println 'h' }\n",
+            "task x\n<< { println 1 }\n",
+            "task y \\\n<< { println 2 }\n",
+            "task z <<\n{ println 3 }\n",
+        ] {
+            assert_eq!(
+                rules("build.gradle", src),
+                vec![("GradleLeftShiftTask", 1)],
+                "{src}"
+            );
+            assert_eq!(fixed("build.gradle", None, src), src, "{src}");
+        }
+        // spaces and tabs are fine, and a comment before `<<` stays where it was
+        assert_eq!(
+            fixed("build.gradle", None, "task a <<\t{ }\ntask e/*x*/<< { }\n"),
+            "task a { doLast { } }\ntask e/*x*/{ doLast { } }\n"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_fixes_finish_in_one_run() {
+        let depth = 9;
+        let names: Vec<String> = (0..depth).map(|i| format!("t{i}")).collect();
+        let src = names
+            .iter()
+            .map(|n| format!("task {n} << {{ "))
+            .collect::<String>()
+            + "println 1"
+            + &" }".repeat(depth)
+            + "\n";
+        let want = names
+            .iter()
+            .map(|n| format!("task {n} {{ doLast {{ "))
+            .collect::<String>()
+            + "println 1"
+            + &" } }".repeat(depth)
+            + "\n";
+        // `fixed` also checks that a second run fixes nothing
+        assert_eq!(fixed("build.gradle", None, &src), want);
     }
 }
