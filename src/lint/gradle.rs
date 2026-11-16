@@ -74,8 +74,15 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     let mut conf_refs = Vec::new();
     let deprecated_space = std::cell::OnceCell::new();
     let mut plugins = HashSet::new();
+    // the script's own methods: its `compile(x)` or `jcenter()` is no configuration (#192)
+    let mut methods = HashSet::new();
     crate::preorder(root, |n| {
         plugins.extend(applied_plugin(src, n));
+        if n.kind() == "method_declaration"
+            && let Some(m) = n.child_by_field_name("name")
+        {
+            methods.insert(text(m, src));
+        }
         removed_api(src, n, &mut removed, &mut conf_refs);
         if let Some(names) = property_scope(src, n)
             && !path
@@ -161,8 +168,12 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
             if c.args.is_empty() {
                 continue;
             }
+            // `buildscript { dependencies { } }` only has `classpath`: a `compile` there was
+            // never valid, and `implementation` isn't either
             if let Some((_, new)) = REMOVED.iter().find(|(old, _)| *old == c.name)
                 && !declared.contains(c.name)
+                && !methods.contains(c.name)
+                && !owners(s, src).any(|o| o == "buildscript")
                 && !*old_gradle.get_or_init(|| wrapper_major(path).is_some_and(|m| m < 7))
             {
                 // the name starts the statement: `testCompile 'a'`, `testCompile('a') { }`
@@ -209,6 +220,9 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                 7,
             ));
         }
+    }
+    if methods.contains("jcenter") {
+        v.retain(|x| x.rule != "GradleJcenter");
     }
     if removed.is_empty() {
         return;
@@ -946,6 +960,7 @@ fn space_assignment(
             .is_empty()
         || !alone(src, s.start_byte(), arg.end_byte())
         || !*deprecated.get_or_init(|| wrapper_version(path).is_none_or(|v| v >= (8, 12)))
+        || shadowed(src, s, c.name)
     {
         return;
     }
@@ -965,6 +980,29 @@ fn space_assignment(
         with: format!("{name} = {}", text(*arg, src)),
     });
     v.push(x);
+}
+
+/// Whether a block around `s` declares a variable `name` (`def version = '1'`, at any
+/// place in the block): then `version x` calls that variable, and `version = x` would
+/// assign it instead of the project's property (#192).
+fn shadowed(src: &str, s: Node, name: &str) -> bool {
+    std::iter::successors(s.parent(), |p| p.parent()).any(|b| {
+        statements(b).iter().any(|d| {
+            let mut found = false;
+            if matches!(
+                d.kind(),
+                "local_variable_declaration" | "field_declaration" | "multi_assignment_declaration"
+            ) {
+                crate::preorder(*d, |x| {
+                    found |= x.kind() == "variable_declarator"
+                        && x.child_by_field_name("name")
+                            .is_some_and(|n| text(n, src) == name);
+                    !found
+                });
+            }
+            found
+        })
+    })
 }
 
 /// The statement `src[start..end]` is one of its own, not part of a call chain
@@ -1301,6 +1339,51 @@ mod tests {
         // a settings or init script has no project
         assert_eq!(rules("settings.gradle", "version '1'\n"), vec![]);
         assert_eq!(rules("x.init.gradle", "version '1'\n"), vec![]);
+    }
+
+    #[test]
+    fn script_names_are_not_gradle_ones() {
+        // #192: with a variable of the name in scope, `version version` calls the variable
+        for src in [
+            "def version = '1.0'\nversion version\n",
+            "def group = 'x'\ngroup 'y'\n",
+            "task foo {\n    def description = 'a'\n    description 'b'\n}\n",
+            "subprojects {\n    def version = '0'\n    version '1'\n}\n",
+            "String version = '0'\nversion '1'\n",
+            "import groovy.transform.Field\n@Field String version = '0'\nversion '1'\n",
+            "def group = 'g0'\nallprojects {\n    group 'g'\n}\n",
+            "def (version, x) = ['0', 1]\nversion '1'\n",
+        ] {
+            assert_eq!(rules("build.gradle", src), vec![], "{src}");
+            assert_eq!(fixed("build.gradle", None, src), src, "{src}");
+        }
+        // a variable elsewhere doesn't hide the project's
+        let src = "task x {\n    def version = 1\n}\nversion '1'\n";
+        assert_eq!(
+            rules("build.gradle", src),
+            vec![("GradleSpaceAssignment", 4)]
+        );
+        // `compile` in buildscript, or the script's own `compile`, `jcenter`
+        for src in [
+            "buildscript {\n    dependencies {\n        classpath 'a:b:1'\n        compile 'x:y:1'\n    }\n}\napply plugin: 'java'\n",
+            "apply plugin: 'java'\ndef compile(x) { println x }\ndependencies {\n    compile 'a:b:1'\n}\n",
+            "def jcenter() { 'x' }\nprintln jcenter()\n",
+        ] {
+            assert_eq!(rules("build.gradle", src), vec![], "{src}");
+            assert_eq!(
+                fixed("build.gradle", Some("implementation"), src),
+                src,
+                "{src}"
+            );
+        }
+        assert_eq!(
+            fixed(
+                "build.gradle",
+                Some("implementation"),
+                "apply plugin: 'java'\ndependencies {\n    compile 'a:b:1'\n}\n"
+            ),
+            "apply plugin: 'java'\ndependencies {\n    implementation 'a:b:1'\n}\n"
+        );
     }
 
     #[test]

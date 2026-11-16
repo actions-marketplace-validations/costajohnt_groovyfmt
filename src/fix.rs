@@ -252,6 +252,14 @@ fn check(
         .filter(|(_, r)| **r == "UnusedImport")
         .flat_map(|(e, _)| import_symbols(src, b, &e.range))
         .collect();
+    // Hubitat appends an `#include`d library to the file, and it can use any import (#192)
+    if crate::lint::hubitat_include(src, b)
+        && edits
+            .iter()
+            .any(|e| !import_symbols(src, b, &e.range).is_empty())
+    {
+        return Err("an #include'd library can use any import of the file");
+    }
     if !gone.is_empty()
         && identifiers(out, a)
             .iter()
@@ -341,6 +349,10 @@ fn identifiers<'a>(src: &'a str, root: Node) -> Vec<&'a str> {
         }
         match n.kind() {
             "identifier" | "type_identifier" => v.push(crate::text(n, src)),
+            // `"$Café.v"`: the grammar's `$name` is ASCII only (#192)
+            "string_literal" if !crate::text(n, src).starts_with('\'') => {
+                crate::lint::dollar_names(crate::text(n, src), &mut v);
+            }
             "gstring_dollar_interpolation" => {
                 v.extend(
                     crate::text(n, src)
@@ -537,9 +549,25 @@ mod tests {
                 "import static a.B.getFoo as getBar\nprintln bar\n",
                 "import static a.B.getFoo as getBar",
             ),
+            // #192: the grammar's `$name` is ASCII only, the net reads the whole string
+            ("import a.B as Ä\nprintln \"$Ä.X\"\n", "import a.B as Ä"),
+            ("import a.Café\nprintln \"$Café.v\"\n", "import a.Café"),
+            ("import a.Café\nprintln /$Café/\n", "import a.Café"),
+            (
+                "import static a.B.getRuntime as getRT\nprintln RT\n",
+                "import static a.B.getRuntime as getRT",
+            ),
         ] {
             assert_eq!(net(src, line), gone, "{src:?}");
         }
+        // #192: a Hubitat library `#include`d at the end can use any import
+        assert_eq!(
+            net(
+                "import javax.crypto.Cipher\nmetadata { }\n#include tuya.tuyaProtocols\n",
+                "import javax.crypto.Cipher"
+            ),
+            Err("an #include'd library can use any import of the file")
+        );
         // in a string, a comment or another import's name: not a use
         for src in [
             "import a.Foo\nprintln 'Foo' // Foo\n",
@@ -550,6 +578,48 @@ mod tests {
         }
         // a non-static import has no property names
         assert_eq!(net("import a.getFoo\nfoo()\n", "import a.getFoo"), Ok(()));
+    }
+
+    #[test]
+    fn imports_whose_removal_changes_a_binding_stay() {
+        // #192. Unicode names used only through `$name` in each GString kind
+        for src in [
+            "import a.B as Ä\nprintln \"$Ä.SECONDS\"\n",
+            "import a.Café\nprintln \"$Café.v\"\n",
+            "import a.Café\nprintln \"\"\"$Café.v\"\"\"\n",
+            "import a.Café\nprintln(/$Café.v/)\n",
+            "import a.Café\nprintln($/$Café.v/$)\n",
+            "import static a.B.SECONDS as Séc\nprintln \"$Séc\"\n",
+            "import a.B as 单位\nprintln \"$单位.X\"\n",
+            // an aliased static accessor, used under the alias's property name
+            "import static java.lang.Runtime.getRuntime as getRT\nprintln RT.availableProcessors()\n",
+            "import static a.Holder.isFlag as isF\nprintln F\n",
+            // Hubitat: the library appended in place of `#include` uses the imports
+            "import javax.crypto.Cipher\nimport a.B\nimport a.B\nmetadata { }\n#include tuya.tuyaProtocols\n",
+            "package p\nimport p.A\n#include a.b\n",
+            // the last import of a name wins: these would switch A to q.A
+            "package p\nimport q.A\nimport p.A\nprintln A.v\n",
+            "package p\nimport q.A as A\nimport p.A\nprintln A.v\n",
+            "import p.A\nimport q.A\nimport p.A\nprintln A.v\n",
+            "import static p.A.v\nimport static q.A.v\nimport static p.A.v\nprintln v\n",
+            "import p.A as X\nimport q.A as X\nimport p.A as X\nprintln X.v\n",
+        ] {
+            assert_eq!(fixed(src), Fix::Nothing, "{src:?}");
+        }
+        // still fixed: ASCII names unused in strings, a lone copy, `#include` in a string
+        assert_eq!(
+            text("import a.B as TU\nprintln \"$T.x\"\n"),
+            "println \"$T.x\"\n"
+        );
+        assert_eq!(text("import p.A\nimport p.A\nA.v\n"), "import p.A\nA.v\n");
+        assert_eq!(
+            text("package p\nimport p.A\nimport q.B\nA.v\nB.v\n"),
+            "package p\nimport q.B\nA.v\nB.v\n"
+        );
+        assert_eq!(
+            text("import a.B\nprintln '#include x'\n"),
+            "println '#include x'\n"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! class of the same name, which one file can't show, so that rule reports but doesn't fix.
 //! Only capitalized names: Groovy resolves a lowercase class name through imports alone.
 
-use super::{Violation, at, dotted, import_has, import_name, own_lines};
+use super::{Violation, at, dotted, hubitat_include, import_has, import_name, own_lines, rebound};
 use crate::text;
 use std::collections::HashSet;
 use std::path::Path;
@@ -72,7 +72,8 @@ pub(super) fn check(path: &Path, src: &str, nodes: &[Node], v: &mut Vec<Violatio
             && !DEFAULT_PACKAGES.contains(&name.as_str())
             && package.as_ref() != Some(&name)
     });
-    for d in imports {
+    let include = hubitat_include(src, root);
+    for &d in &imports {
         let t = text(d, src);
         // `import static`, `import a.B as C` and `@Grab(...) import x` are there for more
         // than the name
@@ -97,7 +98,12 @@ pub(super) fn check(path: &Path, src: &str, nodes: &[Node], v: &mut Vec<Violatio
             name.to_string()
         };
         if package.as_deref() == Some(pkg) {
-            let fix = own_lines(src, d).filter(|_| class.is_none_or(|c| !declared.contains(c)));
+            // the last import of a name wins, so `import q.A` before `import p.A` leaves
+            // `A` meaning q.A without it (#192); an `#include`d library can use any import
+            let fix = own_lines(src, d).filter(|_| {
+                class.is_none_or(|c| !declared.contains(c) && !rebound(src, &imports, d))
+                    && !include
+            });
             v.push(Violation {
                 fix,
                 ..at(
