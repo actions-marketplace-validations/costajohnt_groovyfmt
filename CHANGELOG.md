@@ -4,6 +4,7 @@
 
 ### Added
 
+- The Jenkins lint rules check the declarative pipelines of shared library steps: a `pipeline { }` in a top-level `call` method of a `.groovy` file directly in a `vars` directory, directly in the method's body (after any other statements) or in an `if` branch there, with reports at its lines in the file. Before, only a Jenkinsfile or a file whose first statement is `pipeline { }` was checked, which missed most declarative pipelines in shared libraries. Jenkinsfiles are checked as before. On 922 step files in field-trial clones of shared libraries, all 32 pipelines in them (in 28 files, 14 of them in `if` branches) are now checked, with no reports.
 - `--lint --fix` fixes `Groovy24EmptyElement` by removing the extra comma (`foo(a,,b)` becomes `foo(a,b)`, the call Groovy 2.4 already compiled, now valid on Groovy 3 and 4; only a lone empty element without a trailing comma, the one form 2.4 accepts), and `UnnecessaryGString`, when turned on, by single-quoting the string (`"x"` becomes `'x'`, the same String constant; not a string with a `\u` escape). A report whose message quotes code a fix rewrites (`"a" == "b"`) no longer makes the fix fail its checks.
 
 ## 0.19.0 (2026-11-15)

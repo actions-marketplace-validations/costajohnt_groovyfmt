@@ -124,6 +124,19 @@ These rules catch what the Declarative Pipeline plugin rejects when a build star
 - a file named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`
 - any file whose first statement it is (after comments and imports)
 
+They also check the pipelines of a shared library's steps: a `.groovy` file directly in a `vars` directory, where a `pipeline { }` in a top-level `call` method is checked, whether it stands in the method's body (after any other statements) or in a branch of an `if` there that picks one of several pipelines. Reports point at the lines in the file. A `pipeline { }` in a closure, a loop or a `try` inside `call`, or in a method with another name, is left alone.
+
+```groovy
+// vars/buildApp.groovy
+def call(Map config) {
+    config.label = config.label ?: 'linux'
+    pipeline {
+        agent { label config.label }
+        stages { ... }
+    }
+}
+```
+
 Scripted pipelines (`node { }`) are left alone. Directory walks find pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins` ([which files](usage.md#which-files)); name other pipeline files on the command line, with `--force`. A script found by its `#!groovy` line is Groovy, not a pipeline by its name: the rules check it only when `pipeline { }` is its first statement.
 
 The section lists follow the [syntax reference](https://www.jenkins.io/doc/book/pipeline/syntax/), and the plugin's own parser where they differ.
