@@ -660,6 +660,66 @@ fn lint_fix_keeps_static_accessor_imports_used_as_properties() {
 }
 
 #[test]
+fn lint_fix_keeps_what_would_change_the_program() {
+    // #192: whole-corpus audit; each of these runs differently (or not at all) without the
+    // line --fix used to remove or rewrite
+    let d = Dir::new("fix-192");
+    let keep = [
+        // hubitat-public Tuya drivers: the `#include`d library uses Cipher
+        (
+            "Driver.groovy",
+            "import javax.crypto.Cipher\nmetadata { definition(name: 'x') {} }\n#include tuya.tuyaProtocols\n",
+        ),
+        (
+            "Uni.groovy",
+            "import java.util.concurrent.TimeUnit as Ä\nprintln \"$Ä.SECONDS\"\n",
+        ),
+        ("Cafe.groovy", "import a.Café\nprintln($/$Café.v/$)\n"),
+        (
+            "Rt.groovy",
+            "import static java.lang.Runtime.getRuntime as getRT\nprintln RT.availableProcessors()\n",
+        ),
+        (
+            "p/Same.groovy",
+            "package p\nimport q.A\nimport p.A\nprintln A.v\n",
+        ),
+        (
+            "Dup.groovy",
+            "import p.A\nimport q.A\nimport p.A\nprintln A.v\n",
+        ),
+        (
+            "version/build.gradle",
+            "def version = '1.0'\nversion version\n",
+        ),
+        (
+            "compile/build.gradle",
+            "apply plugin: 'java'\ndef compile(x) { println x }\ndependencies {\n    compile 'a:b:1'\n}\nbuildscript {\n    dependencies {\n        compile 'x:y:1'\n    }\n}\n",
+        ),
+    ];
+    for (f, src) in keep {
+        d.write(f, src);
+    }
+    d.write("Gone.groovy", "import a.B as TU\nprintln \"$T.x\"\n");
+    let f = run(&d.0, &["--lint", "--fix"], None);
+    assert_eq!(f.status.code(), Some(1), "{}", stderr(&f));
+    for (f, src) in keep {
+        assert_eq!(d.read(f), src, "{f}");
+    }
+    assert_eq!(d.read("Gone.groovy"), "println \"$T.x\"\n");
+    // still reported, not fixed
+    assert!(
+        stdout(&f).contains("Driver.groovy:1:1: UnusedImport"),
+        "{}",
+        stdout(&f)
+    );
+    assert!(
+        stdout(&f).contains("Dup.groovy:3:1: DuplicateImport"),
+        "{}",
+        stdout(&f)
+    );
+}
+
+#[test]
 fn lint_fix_removes_imports_and_semicolons_and_reports_the_rest() {
     let d = Dir::new("fix");
     d.write("A.groovy", FIXABLE);
