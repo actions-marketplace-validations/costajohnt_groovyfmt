@@ -17,6 +17,7 @@
 //! [lint]                      # rule name = on/off; omitted rules use their default
 //! UnnecessaryGString = true
 //! UnusedImport = false
+//! gradle_compile_replacement = "implementation" # or "api": lets --fix replace `compile`
 //! ```
 
 use crate::format::Style;
@@ -40,6 +41,9 @@ pub struct Config {
     pub file: Option<PathBuf>,
     /// The lint baseline, relative to `root` until `load` makes it absolute.
     pub baseline: Option<PathBuf>,
+    /// What `--fix` replaces a removed `compile` dependency with, `implementation` or
+    /// `api`; without it, that report isn't fixed (only the build's author knows which).
+    pub gradle_compile_replacement: Option<String>,
 }
 
 impl Config {
@@ -91,6 +95,17 @@ impl Config {
                 }
                 ("lint", toml::Value::Table(rules)) => {
                     for (rule, on) in rules {
+                        if rule == "gradle_compile_replacement" {
+                            match on.as_str() {
+                                Some(r @ ("implementation" | "api")) => {
+                                    cfg.gradle_compile_replacement = Some(r.to_string())
+                                }
+                                _ => {
+                                    return Err("`lint.gradle_compile_replacement` must be \"implementation\" or \"api\"".into());
+                                }
+                            }
+                            continue;
+                        }
                         if !RULES.iter().any(|r| r.name == rule) {
                             let known: Vec<_> = RULES.iter().map(|r| r.name).collect();
                             return Err(format!(
@@ -477,6 +492,14 @@ mod tests {
                 .contains("unknown lint rule")
         );
         assert!(Config::parse("[lint]\nUnusedImport = 1").is_err());
+        assert!(Config::parse("[lint]\ngradle_compile_replacement = \"runtimeOnly\"").is_err());
+        assert_eq!(
+            Config::parse("[lint]\ngradle_compile_replacement = \"api\"")
+                .unwrap()
+                .gradle_compile_replacement
+                .as_deref(),
+            Some("api")
+        );
         assert!(Config::parse("indent = ").is_err(), "TOML syntax error");
         for bad in [
             "exclude = \"a\"",

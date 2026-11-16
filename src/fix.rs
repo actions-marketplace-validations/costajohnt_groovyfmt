@@ -1,13 +1,15 @@
-//! `--lint --fix`: delete what UnusedImport, DuplicateImport, ImportFromSamePackage and
-//! UnnecessarySemicolon flag
-//! (their `Violation::fix` ranges), then prove the result safe, as `format` does its output.
-//! The fixed text must parse cleanly; its tokens must be the input's minus exactly the
-//! deleted ones; its parse tree must have the input's shape minus the deleted nodes (so a
-//! removed `;` can't join two statements, or make a statement another's body); and linting
-//! it must find the input's other violations and nothing new. Otherwise the file is left as
-//! it was. Removing one `;` can expose another (`a();;`), so this runs a few rounds.
+//! `--lint --fix`: apply the edits of the violations that have one (`Violation::fix`):
+//! delete what UnusedImport, DuplicateImport, ImportFromSamePackage and
+//! UnnecessarySemicolon flag, and rewrite what the fixable Gradle rules flag. Then prove the
+//! result safe, as `format` does its output. The fixed text must parse cleanly; its tokens
+//! outside the edited ranges must be the input's outside them; its parse tree outside them
+//! must have the input's shape (so a removed `;` can't join two statements, or make a
+//! statement another's body, and a rewritten statement can't take in its neighbor); and
+//! linting it must find the input's other violations and nothing new. Otherwise the file is
+//! left as it was. One fix can expose another (`a();;`), and of two overlapping edits only
+//! the first is made in a round, so this runs a few rounds.
 
-use crate::lint::{Violation, lint_file};
+use crate::lint::{Edit, Violation, lint_file};
 use std::ops::Range;
 use std::path::Path;
 use tree_sitter::{Node, Tree};
@@ -22,31 +24,43 @@ pub enum Fix {
     Refused(&'static str),
 }
 
-const MAX_ROUNDS: usize = 4;
+const MAX_ROUNDS: usize = 6;
 
 /// Fix the violations of `src`, the text of `path` (which decides the Jenkins, Gradle and
 /// Spock rules), that have a fix and that `wanted` (a rule enabled in the config, and not
-/// in the baseline) accepts; it is also given the text the violation is in.
-pub fn fix(path: &Path, src: &str, wanted: impl Fn(&Violation, &str) -> bool) -> Fix {
+/// in the baseline) accepts; it is also given the text the violation is in. `compile` is
+/// the config's `gradle_compile_replacement`, which makes `compile` dependencies fixable.
+pub fn fix(
+    path: &Path,
+    src: &str,
+    compile: Option<&str>,
+    wanted: impl Fn(&Violation, &str) -> bool,
+) -> Fix {
     let mut text = src.to_string();
     let mut fixed = Vec::new();
     for _ in 0..MAX_ROUNDS {
-        let Ok(vs) = lint_file(path, &text) else {
+        let Ok(mut vs) = lint_file(path, &text) else {
             return Fix::Refused("parse error");
         };
+        crate::lint::opt_in_fixes(&mut vs, &text, compile);
         let (todo, keep): (Vec<_>, Vec<_>) = vs
             .into_iter()
             .partition(|v| v.fix.is_some() && wanted(v, &text));
         if todo.is_empty() {
             break;
         }
-        let removed = ranges(&todo);
-        let out = delete(&text, &removed);
+        let (edits, done) = edits(&todo);
+        let (out, inserted) = apply(&text, &edits);
         let auto = |v: &Violation| v.fix.is_some() && wanted(v, &out);
-        if let Err(why) = check(path, &text, &out, &removed, keep, &auto) {
+        if let Err(why) = check(path, &text, &out, &edits, &inserted, keep, compile, &auto) {
             return Fix::Refused(why);
         }
-        fixed.extend(todo);
+        fixed.extend(
+            todo.into_iter()
+                .zip(done)
+                .filter(|(_, d)| *d)
+                .map(|(v, _)| v),
+        );
         text = out;
     }
     if fixed.is_empty() {
@@ -56,33 +70,46 @@ pub fn fix(path: &Path, src: &str, wanted: impl Fn(&Violation, &str) -> bool) ->
     }
 }
 
-/// The ranges to delete, sorted, each inside none of the others (the `;` of a removed
-/// import line goes with the line).
-fn ranges(todo: &[Violation]) -> Vec<Range<usize>> {
-    let mut rs: Vec<Range<usize>> = todo.iter().filter_map(|v| v.fix.clone()).collect();
-    rs.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
-    let mut out: Vec<Range<usize>> = Vec::new();
-    for r in rs {
-        if out.last().is_none_or(|last| r.start >= last.end) {
-            out.push(r);
-        } else if let Some(last) = out.last_mut() {
-            // overlapping without nesting can't happen (lines and single `;`), but if it
-            // does, delete the union; the checks below still decide
-            last.end = last.end.max(r.end);
+/// The edits to make this round, sorted and none overlapping another, and for each
+/// violation whether this round fixes it: its edit is made, or lies in a range one made
+/// deletes (the `;` of a removed import line goes with the line). An edit overlapping one
+/// made otherwise waits for the next round, which lints the text again.
+fn edits(todo: &[Violation]) -> (Vec<Edit>, Vec<bool>) {
+    let mut order: Vec<usize> = (0..todo.len()).collect();
+    let range = |i: usize| todo[i].fix.as_ref().map_or(0..0, |e| e.range.clone());
+    order.sort_by_key(|&i| (range(i).start, std::cmp::Reverse(range(i).end)));
+    let mut out: Vec<Edit> = Vec::new();
+    let mut done = vec![false; todo.len()];
+    for i in order {
+        let Some(e) = todo[i].fix.clone() else {
+            continue;
+        };
+        match out.last() {
+            Some(last) if e.range.start < last.range.end => {
+                done[i] = last.with.is_empty() && e.range.end <= last.range.end;
+            }
+            _ => {
+                out.push(e);
+                done[i] = true;
+            }
         }
     }
-    out
+    (out, done)
 }
 
-fn delete(src: &str, removed: &[Range<usize>]) -> String {
+/// The text with `edits` made, and where each edit's new text is in it.
+fn apply(src: &str, edits: &[Edit]) -> (String, Vec<Range<usize>>) {
     let mut out = String::with_capacity(src.len());
+    let mut inserted = Vec::new();
     let mut at = 0;
-    for r in removed {
-        out.push_str(&src[at..r.start]);
-        at = r.end;
+    for e in edits {
+        out.push_str(&src[at..e.range.start]);
+        inserted.push(out.len()..out.len() + e.with.len());
+        out.push_str(&e.with);
+        at = e.range.end;
     }
     out.push_str(&src[at..]);
-    out
+    (out, inserted)
 }
 
 fn inside(n: Node, removed: &[Range<usize>]) -> bool {
@@ -91,37 +118,50 @@ fn inside(n: Node, removed: &[Range<usize>]) -> bool {
         .any(|r| r.start <= n.start_byte() && n.end_byte() <= r.end)
 }
 
+#[allow(clippy::too_many_arguments)] // the two texts and the edits between them
 fn check(
     path: &Path,
     src: &str,
     out: &str,
-    removed: &[Range<usize>],
+    edits: &[Edit],
+    inserted: &[Range<usize>],
     keep: Vec<Violation>,
+    compile: Option<&str>,
     auto: &impl Fn(&Violation) -> bool,
 ) -> Result<(), &'static str> {
+    let removed: Vec<Range<usize>> = edits.iter().map(|e| e.range.clone()).collect();
     let (before, after) = (crate::parse(src), crate::parse(out));
     if after.root_node().has_error() {
         return Err("the fixed file would not parse");
     }
-    if leaves(src, &before, removed) != leaves(out, &after, &[]) {
-        return Err("tokens other than the removed ones would change");
+    if leaves(src, &before, &removed) != leaves(out, &after, inserted) {
+        return Err("tokens other than the edited ones would change");
     }
-    if shape(&before, removed) != shape(&after, &[]) {
+    if shape(&before, &removed) != shape(&after, inserted) {
         return Err("the parse tree would change shape");
     }
-    // the other violations stay, except one inside a removed line (a `;` whose rule is off,
-    // an unused import that is also unnecessary); new fixable ones are left for the next round
+    // the other violations stay, except one inside an edited range (a `;` whose rule is off,
+    // an unused import that is also unnecessary, a dynamic version in a rewritten
+    // dependency), whose counterpart in the new text isn't compared either; new fixable ones
+    // are left for the next round
     let key = |v: &Violation| (v.rule, v.message.clone());
-    let within = |x: &Range<usize>| removed.iter().any(|r| r.start <= x.start && x.end <= r.end);
+    let within = |rs: &[Range<usize>], x: &Range<usize>| {
+        rs.iter().any(|r| r.start <= x.start && x.end <= r.end)
+    };
     let mut want: Vec<_> = keep
         .iter()
-        .filter(|v| !within(&v.span) && !v.fix.as_ref().is_some_and(within))
+        .filter(|v| {
+            !within(&removed, &v.span)
+                && !v.fix.as_ref().is_some_and(|e| within(&removed, &e.range))
+        })
         .map(key)
         .collect();
-    let mut got: Vec<_> = lint_file(path, out)
-        .map_err(|_| "the fixed file would not parse")?
+    let new: Vec<Range<usize>> = inserted.iter().filter(|r| !r.is_empty()).cloned().collect();
+    let mut vs = lint_file(path, out).map_err(|_| "the fixed file would not parse")?;
+    crate::lint::opt_in_fixes(&mut vs, out, compile);
+    let mut got: Vec<_> = vs
         .iter()
-        .filter(|v| !auto(v))
+        .filter(|v| !auto(v) && !within(&new, &v.span))
         .map(key)
         .collect();
     want.sort();
@@ -177,7 +217,7 @@ mod tests {
     use crate::lint::lint;
 
     fn fixed(src: &str) -> Fix {
-        fix(Path::new("A.groovy"), src, |_, _| true)
+        fix(Path::new("A.groovy"), src, None, |_, _| true)
     }
 
     fn text(src: &str) -> String {
@@ -311,13 +351,13 @@ mod tests {
     fn only_wanted_rules_are_fixed() {
         let src = "import a.B;\nx = 1;\n";
         let semis = |v: &Violation, _: &str| v.rule == "UnnecessarySemicolon";
-        let Fix::Fixed(t, f) = fix(Path::new("A.groovy"), src, semis) else {
+        let Fix::Fixed(t, f) = fix(Path::new("A.groovy"), src, None, semis) else {
             panic!()
         };
         assert_eq!((t.as_str(), f.len()), ("import a.B\nx = 1\n", 2));
         // the import line goes with its `;` even when UnnecessarySemicolon is off
         let imports = |v: &Violation, _: &str| v.rule == "UnusedImport";
-        let Fix::Fixed(t, f) = fix(Path::new("A.groovy"), src, imports) else {
+        let Fix::Fixed(t, f) = fix(Path::new("A.groovy"), src, None, imports) else {
             panic!()
         };
         assert_eq!(t, "x = 1;\n");
@@ -327,6 +367,10 @@ mod tests {
     #[test]
     #[allow(clippy::single_range_in_vec_init)] // one range deleted is the common case
     fn the_checks_reject_a_change_of_shape() {
+        let del = |range| Edit {
+            range,
+            with: String::new(),
+        };
         // without the empty-body `;` (which lint never flags), `a()` would become the body:
         // same tokens, different tree
         assert_eq!(
@@ -334,8 +378,10 @@ mod tests {
                 Path::new("A.groovy"),
                 "while (x);\na()\n",
                 "while (x)\na()\n",
-                &[9..10],
+                &[del(9..10)],
+                &[9..9],
                 Vec::new(),
+                None,
                 &|_| true
             ),
             Err("the parse tree would change shape")
@@ -346,8 +392,10 @@ mod tests {
                 Path::new("A.groovy"),
                 "x = 1;\n",
                 "x = 2\n",
-                &[5..6],
+                &[del(5..6)],
+                &[5..5],
                 Vec::new(),
+                None,
                 &|_| true
             )
             .is_err()
@@ -357,8 +405,10 @@ mod tests {
                 Path::new("A.groovy"),
                 "x = 1;\n",
                 "x = 1\n",
-                &[5..6],
+                &[del(5..6)],
+                &[5..5],
                 Vec::new(),
+                None,
                 &|_| true
             )
             .is_ok()
@@ -368,8 +418,10 @@ mod tests {
                 Path::new("A.groovy"),
                 "x = 1;\ny = 2\n",
                 "x = 1\ny = 2 +\n",
-                &[5..6],
+                &[del(5..6)],
+                &[5..5],
                 Vec::new(),
+                None,
                 &|_| true
             ),
             Err("the fixed file would not parse")
