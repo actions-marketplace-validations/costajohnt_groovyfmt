@@ -9,7 +9,9 @@
 //!
 //! Only a declarative pipeline is checked: a top-level `pipeline { }` in a file named
 //! `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`,
-//! `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, or in any file whose first statement it is.
+//! `*_Jenkinsfile`, `*.jenkinsfile` or `*.jenkins`, or in any file whose first statement it is,
+//! and a `pipeline { }` directly in the body of a top-level `call` method of a shared library
+//! step (`vars/*.groovy`), after any other statements there.
 //! Scripted pipelines (`node { }`) are never checked.
 
 use super::{Violation, at, constant_value, has_interpolation};
@@ -220,6 +222,36 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     } else if let Some(p) = top.next().filter(|n| n.kind() == "pipeline_statement") {
         pipeline(src, p, v);
     }
+    if named || !library_step(path) {
+        return;
+    }
+    // Only a pipeline directly in a top-level `call` method's body: one inside an `if` or a
+    // closure there may be one of several the step chooses between, and is left alone.
+    let mut c = root.walk();
+    for m in root.named_children(&mut c).filter(|m| {
+        m.kind() == "method_declaration"
+            && m.child_by_field_name("name")
+                .is_some_and(|n| text(n, src) == "call")
+    }) {
+        let Some(body) = m.child_by_field_name("body") else {
+            continue;
+        };
+        let mut c = body.walk();
+        body.named_children(&mut c)
+            .filter(|n| n.kind() == "pipeline_statement")
+            .for_each(|p| pipeline(src, p, v));
+    }
+}
+
+/// A shared library's global step, `vars/<name>.groovy`, whose `call` method Jenkins runs
+/// when a Jenkinsfile names the step. Only files directly in `vars` are steps.
+fn library_step(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "groovy")
+        && std::path::absolute(path).is_ok_and(|p| {
+            p.parent()
+                .and_then(|d| d.file_name())
+                .is_some_and(|d| d == "vars")
+        })
 }
 
 /// Reads the sections of a block: reports statements that aren't sections, names not in
@@ -1155,6 +1187,66 @@ mod tests {
                 v.iter().any(|v| v.rule == "JenkinsMissingSection"),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn shared_library_steps() {
+        let bad = "pipeline {\n stages { }\n }";
+        let jenkins = |name: &str, src: &str| -> Vec<(&'static str, usize)> {
+            lint_file(Path::new(name), src)
+                .expect("parses")
+                .into_iter()
+                .filter(|v| v.rule.starts_with("Jenkins"))
+                .map(|v| (v.rule, v.line))
+                .collect()
+        };
+        // statements before the pipeline, a typed parameter, positions in the file
+        let step = format!(
+            "import a.B\n\ndef call(Map config) {{\n def x = config.x\n {bad}\n}}\n\ndef call() {{ {bad} }}\n"
+        );
+        let missing = vec![
+            ("JenkinsMissingSection", 5),
+            ("JenkinsMissingSection", 6),
+            ("JenkinsMissingSection", 10),
+            ("JenkinsMissingSection", 11),
+        ];
+        assert_eq!(jenkins("vars/build.groovy", &step), missing);
+        assert_eq!(jenkins("lib/vars/build.groovy", &step), missing);
+        // valid, with the closure-config preamble steps use
+        let valid = format!(
+            "def call(body) {{\n def config = [:]\n body.resolveStrategy = Closure.DELEGATE_FIRST\n body.delegate = config\n body()\n{VALID}}}\n"
+        );
+        assert_eq!(jenkins("vars/build.groovy", &valid), vec![]);
+        for (name, src) in [
+            // not a step: not directly in vars, not .groovy
+            ("src/build.groovy", step.clone()),
+            ("vars/sub/build.groovy", step.clone()),
+            ("vars/build.txt", step.clone()),
+            (
+                "vars/build.groovy",
+                "def call() {\n pipeline { } | x\n}\n".into(),
+            ),
+            (
+                "vars/build.groovy",
+                "def call() {\n pipeline() { stages { } }\n}\n".into(),
+            ),
+            // not `call`, not directly in its body
+            ("vars/build.groovy", format!("def run() {{ {bad} }}\n")),
+            (
+                "vars/build.groovy",
+                format!("def call(c) {{\n if (c) {{ {bad} }}\n}}\n"),
+            ),
+            (
+                "vars/build.groovy",
+                format!("def call() {{\n node {{ {bad} }}\n}}\n"),
+            ),
+            (
+                "vars/build.groovy",
+                format!("class A {{\n def call() {{ {bad} }}\n}}\n"),
+            ),
+        ] {
+            assert_eq!(jenkins(name, &src), vec![], "{name}: {src}");
         }
     }
 
