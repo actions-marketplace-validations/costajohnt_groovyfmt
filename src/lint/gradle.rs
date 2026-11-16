@@ -23,7 +23,8 @@ use tree_sitter::Node;
 /// `--fix` makes; `compile`'s depends on whether the library's API exposes the dependency,
 /// so it is fixed only with `gradle_compile_replacement` set (`opt_in_compile`).
 /// Plugins that make the removed configurations' replacements (runtimeOnly,
-/// testImplementation, testRuntimeOnly, implementation): Java and the plugins that apply it.
+/// testImplementation, testRuntimeOnly, implementation): Java, the plugins that apply it,
+/// and Android's.
 /// A rename is fixed only in a file that applies one; a file whose plugins come from a parent
 /// (`allprojects`, a convention plugin) may have none of the new names, so it's only reported.
 const JVM_PLUGINS: &[&str] = &[
@@ -36,6 +37,15 @@ const JVM_PLUGINS: &[&str] = &[
     "java-gradle-plugin",
     "kotlin",
     "org.jetbrains.kotlin.jvm",
+    // the Android Gradle plugin's module types make the same configurations (api too, but
+    // `compile` -> `api` waits for java-library or com.android.library, `opt_in_compile`)
+    "com.android.application",
+    "com.android.library",
+    "com.android.dynamic-feature",
+    "com.android.test",
+    // apply java (and groovy), per the Ratpack manual's Gradle chapter
+    "io.ratpack.ratpack-java",
+    "io.ratpack.ratpack-groovy",
 ];
 
 /// The message when a rename isn't fixed for want of a plugin from `JVM_PLUGINS`.
@@ -904,7 +914,8 @@ fn property_scope(src: &str, n: Node) -> Option<&'static [&'static str]> {
 }
 
 /// GradleSpaceAssignment: `description 'x'` for `description = 'x'`, a property in `names`
-/// set with one argument and no parentheses. Quiet under a wrapper pinning a Gradle before
+/// set with one argument and no parentheses, alone on its line but for `;`, braces and a
+/// comment: `group 'a' version 'b'` is the call chain `group('a').version('b')`. Quiet under a wrapper pinning a Gradle before
 /// 8.12, which deprecated it.
 fn space_assignment(
     src: &str,
@@ -933,6 +944,7 @@ fn space_assignment(
         || !src[s.start_byte() + c.name.len()..arg.start_byte()]
             .trim()
             .is_empty()
+        || !alone(src, s.start_byte(), arg.end_byte())
         || !*deprecated.get_or_init(|| wrapper_version(path).is_none_or(|v| v >= (8, 12)))
     {
         return;
@@ -953,6 +965,18 @@ fn space_assignment(
         with: format!("{name} = {}", text(*arg, src)),
     });
     v.push(x);
+}
+
+/// The statement `src[start..end]` is one of its own, not part of a call chain
+/// (`group 'a' version 'b'`, `version 'a' call()`, a `\` continuation): on its line only
+/// a block's `{` or a `;` comes before it, with no `\` ending the line above, and only `;`,
+/// a block's `}` or a `//` comment after it.
+fn alone(src: &str, start: usize, end: usize) -> bool {
+    let before = src[..start].rsplit('\n').next().unwrap_or("").trim_end();
+    let after = src[end..].lines().next().unwrap_or("").trim_start();
+    (before.is_empty() || before.ends_with(['{', ';']))
+        && !src[..start].trim_end().ends_with('\\')
+        && (after.is_empty() || after.starts_with([';', '}']) || after.starts_with("//"))
 }
 
 /// GradleRemovedConfiguration on `compile` names the replacement the config gives,
@@ -980,8 +1004,11 @@ pub(super) fn opt_in_compile(vs: &mut [Violation], src: &str, with: &str) {
         });
         let why = if !plugins.iter().any(|p| JVM_PLUGINS.contains(&p.as_str())) {
             NO_JVM_PLUGIN
-        } else if with == "api" && !plugins.contains("java-library") {
-            " (not fixed: api needs the java-library plugin, which this file doesn't apply)"
+        } else if with == "api"
+            && !plugins.contains("java-library")
+            && !plugins.contains("com.android.library")
+        {
+            " (not fixed: api needs the java-library or com.android.library plugin, which this file doesn't apply)"
         } else {
             x.fix = Some(Edit {
                 range: x.span.start..x.span.start + 7,
@@ -1036,6 +1063,41 @@ pub(crate) fn same_call(
         && (old.1 == new.1
             || (old.1.iter().all(|a| a.0 == "named_argument")
                 && matches!(new.1.as_slice(), [("string_literal", _)])))
+}
+
+/// For `fix::check`, on a GradleSpaceAssignment rewrite: `before[range]` of `src` is a call
+/// of one argument, and `after[ins]` of `out` a statement of its own that assigns that
+/// argument's text to the property the call named.
+pub(crate) fn same_assignment(
+    src: &str,
+    before: Node,
+    range: &std::ops::Range<usize>,
+    out: &str,
+    after: Node,
+    ins: &std::ops::Range<usize>,
+) -> bool {
+    let Some((name, args, None)) = call_at(src, before, range) else {
+        return false;
+    };
+    let [(_, value)] = args.as_slice() else {
+        return false;
+    };
+    let Some(n) = after.descendant_for_byte_range(ins.start, ins.start + 1) else {
+        return false;
+    };
+    std::iter::successors(Some(n), |p| p.parent())
+        .take_while(|p| p.start_byte() == ins.start && p.end_byte() <= ins.end)
+        .any(|p| {
+            p.kind() == "assignment_expression"
+                && p.end_byte() == ins.end
+                && p.parent()
+                    .is_some_and(|s| s.kind() == "expression_statement")
+                && p.child_by_field_name("left")
+                    .is_some_and(|l| l.kind() == "identifier" && text(l, out) == name)
+                && p.child_by_field_name("right")
+                    .is_some_and(|r| text(r, out) == *value)
+        })
+        && alone(out, ins.start, ins.end)
 }
 
 #[cfg(test)]
@@ -1239,6 +1301,56 @@ mod tests {
         // a settings or init script has no project
         assert_eq!(rules("settings.gradle", "version '1'\n"), vec![]);
         assert_eq!(rules("x.init.gradle", "version '1'\n"), vec![]);
+    }
+
+    #[test]
+    fn space_assignment_is_fixed_only_as_a_statement_of_its_own() {
+        // Groovy reads these as call chains, `group('a').version('b')`,
+        // `version('a').call()`, or a `\` continuation joins the next line on; the last two
+        // aren't commands at all
+        for src in [
+            "group 'a' version 'b'\n",
+            "version 'a' call()\n",
+            "version 'a' call\n",
+            "version x y\n",
+            "version 'a' /* c */ group 'b'\n",
+            "group 'a' \\\n  version 'b'\n",
+            "version -1\n",
+            "version [1]\n",
+        ] {
+            assert_eq!(rules("build.gradle", src), vec![], "{src}");
+            assert_eq!(fixed("build.gradle", None, src), src, "{src}");
+        }
+        // one value, which the assignment gives the property just as the call did
+        for (src, out) in [
+            ("version 'a' + 'b'\n", "version = 'a' + 'b'\n"),
+            ("version \"${x}\"\n", "version = \"${x}\"\n"),
+            (
+                "description \'\'\'multi\nline\'\'\'\n",
+                "description = \'\'\'multi\nline\'\'\'\n",
+            ),
+            ("version 'a' // why\n", "version = 'a' // why\n"),
+            // (the `;` goes as unnecessary)
+            ("version 'a';\n", "version = 'a'\n"),
+            (
+                "version 'α😀' ; group 'ü'\n",
+                "version = 'α😀' ; group = 'ü'\n",
+            ),
+            (
+                "subprojects { version '1' }\n",
+                "subprojects { version = '1' }\n",
+            ),
+            // a method call binds to the value: `version('x'.toString())`
+            ("version 'x' .toString()\n", "version = 'x' .toString()\n"),
+            ("version 'a'\n  .trim()\n", "version = 'a'\n  .trim()\n"),
+            (
+                "description 'x' \\\n  + 'y'\n",
+                "description = 'x' \\\n  + 'y'\n",
+            ),
+            ("version x\n", "version = x\n"),
+        ] {
+            assert_eq!(fixed("build.gradle", None, src), out, "{src}");
+        }
     }
 
     #[test]
@@ -1474,6 +1586,12 @@ mod tests {
             "plugins {\n    id 'java-library'\n}\n",
             "plugins {\n    id('application')\n}\n",
             "plugins {\n    id 'org.jetbrains.kotlin.jvm' version '1.9.0'\n}\n",
+            "plugins {\n    id 'com.android.application'\n}\n",
+            "apply plugin: 'com.android.library'\n",
+            "plugins {\n    id 'com.android.dynamic-feature'\n}\n",
+            "plugins {\n    id 'com.android.test'\n}\n",
+            "plugins {\n    id 'io.ratpack.ratpack-java' version '1.9.0'\n}\n",
+            "apply plugin: 'io.ratpack.ratpack-groovy'\n",
         ] {
             let src = format!("{plugin}{deps}");
             assert_eq!(
@@ -1514,13 +1632,14 @@ mod tests {
         for plugin in [
             "apply plugin: 'java'\n",
             "plugins {\n    id 'application'\n}\n",
+            "plugins {\n    id 'com.android.application'\n}\n",
         ] {
             let src = format!("{plugin}{deps}");
             let mut vs = lint_file(Path::new("build.gradle"), &src).unwrap();
             crate::lint::opt_in_fixes(&mut vs, &src, Some("api"));
             assert_eq!(
                 vs[0].message,
-                "The `compile` configuration was removed in Gradle 7.0; use api (`gradle_compile_replacement`) (not fixed: api needs the java-library plugin, which this file doesn't apply)"
+                "The `compile` configuration was removed in Gradle 7.0; use api (`gradle_compile_replacement`) (not fixed: api needs the java-library or com.android.library plugin, which this file doesn't apply)"
             );
             assert_eq!(vs[0].fix, None);
             assert_eq!(fixed("build.gradle", Some("api"), &src), src);
@@ -1530,11 +1649,17 @@ mod tests {
                 src.replace("compile", "implementation")
             );
         }
-        let src = format!("apply plugin: 'java'\napply plugin: 'java-library'\n{deps}");
-        assert_eq!(
-            fixed("build.gradle", Some("api"), &src),
-            src.replace("compile", "api")
-        );
+        for plugin in [
+            "apply plugin: 'java'\napply plugin: 'java-library'\n",
+            "plugins {\n    id 'com.android.library'\n}\n",
+        ] {
+            let src = format!("{plugin}{deps}");
+            assert_eq!(
+                fixed("build.gradle", Some("api"), &src),
+                src.replace("compile", "api"),
+                "{plugin}"
+            );
+        }
     }
 
     #[test]

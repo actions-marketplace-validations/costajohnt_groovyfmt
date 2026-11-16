@@ -772,7 +772,7 @@ mod suppress;
 mod unused;
 
 pub use elsewhere::Projects;
-pub(crate) use gradle::same_call;
+pub(crate) use gradle::{same_assignment, same_call};
 
 #[derive(Debug, PartialEq)]
 pub struct Violation {

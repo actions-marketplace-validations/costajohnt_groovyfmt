@@ -32,6 +32,8 @@ const MAX_ROUNDS: usize = 64;
 
 /// Rules whose fix rewrites a dependency statement, which must parse as the same call.
 const CALL_REWRITES: &[&str] = &["GradleDependencyParentheses", "GradleDependencyTuple"];
+/// The rule whose fix turns a call into an assignment of the same value to its property.
+const ASSIGNMENT_REWRITE: &str = "GradleSpaceAssignment";
 
 /// Fix the violations of `src`, the text of `path` (which decides the Jenkins, Gradle and
 /// Spock rules), that have a fix and that `wanted` (a rule enabled in the config, and not
@@ -90,7 +92,7 @@ fn round(
     wanted: &impl Fn(&Violation, &str) -> bool,
     dropped: &mut Option<&'static str>,
 ) -> Result<Option<(String, Vec<Violation>)>, &'static str> {
-    let attempt = |es: &[Edit], calls: &[bool]| {
+    let attempt = |es: &[Edit], calls: &[&str]| {
         let (out, inserted) = apply(text, es);
         let auto = |v: &Violation| v.fix.is_some() && wanted(v, &out);
         check(path, text, &out, es, &inserted, calls, keep, compile, &auto).map(|()| out)
@@ -98,10 +100,7 @@ fn round(
     while !todo.is_empty() {
         let (made, done) = edits(&todo);
         let es: Vec<Edit> = made.iter().filter_map(|&i| todo[i].fix.clone()).collect();
-        let calls: Vec<bool> = made
-            .iter()
-            .map(|&i| CALL_REWRITES.contains(&todo[i].rule))
-            .collect();
+        let calls: Vec<&str> = made.iter().map(|&i| todo[i].rule).collect();
         match attempt(&es, &calls) {
             Ok(out) => {
                 let done = todo
@@ -180,7 +179,8 @@ fn inside(n: Node, removed: &[Range<usize>]) -> bool {
         .any(|r| r.start <= n.start_byte() && n.end_byte() <= r.end)
 }
 
-/// `calls` says which edits rewrite a dependency statement (`CALL_REWRITES`).
+/// `calls` is each edit's rule, which says whether it rewrites a dependency statement
+/// (`CALL_REWRITES`) or turns a call into an assignment (`ASSIGNMENT_REWRITE`).
 #[allow(clippy::too_many_arguments)] // the two texts and the edits between them
 fn check(
     path: &Path,
@@ -188,7 +188,7 @@ fn check(
     out: &str,
     edits: &[Edit],
     inserted: &[Range<usize>],
-    calls: &[bool],
+    calls: &[&str],
     keep: &[Violation],
     compile: Option<&str>,
     auto: &impl Fn(&Violation) -> bool,
@@ -199,9 +199,14 @@ fn check(
         return Err("the fixed file would not parse");
     }
     let (b, a) = (before.root_node(), after.root_node());
-    for ((e, ins), _) in edits.iter().zip(inserted).zip(calls).filter(|(_, c)| **c) {
-        if !crate::lint::same_call(src, b, &e.range, out, a, ins) {
+    for ((e, ins), rule) in edits.iter().zip(inserted).zip(calls) {
+        if CALL_REWRITES.contains(rule) && !crate::lint::same_call(src, b, &e.range, out, a, ins) {
             return Err("a rewritten dependency would parse as a different call");
+        }
+        if *rule == ASSIGNMENT_REWRITE
+            && !crate::lint::same_assignment(src, b, &e.range, out, a, ins)
+        {
+            return Err("a space assignment would not become the same assignment");
         }
     }
     if leaves(src, &before, &removed) != leaves(out, &after, inserted) {
@@ -519,7 +524,7 @@ mod tests {
                 with: out[19..out.len() - 3].to_string(),
             };
             let ins = 19..out.len() - 3;
-            let run = |calls: &[bool]| {
+            let run = |calls: &[&str]| {
                 check(
                     Path::new("build.gradle"),
                     &src,
@@ -533,7 +538,7 @@ mod tests {
                 )
             };
             assert_eq!(
-                run(&[true]),
+                run(&["GradleDependencyParentheses"]),
                 Err("a rewritten dependency would parse as a different call"),
                 "{arg}"
             );
@@ -561,7 +566,7 @@ mod tests {
                     out,
                     &[edit],
                     &[ins],
-                    &[true],
+                    &["GradleDependencyTuple"],
                     &[],
                     None,
                     &|_| true
@@ -570,6 +575,42 @@ mod tests {
                 "{src}"
             );
         }
+    }
+
+    #[test]
+    fn the_checks_reject_a_space_assignment_that_is_not_the_same_assignment() {
+        // `with` for the first line of `src`, from `from` on
+        let run = |src: &str, from: &str, with: &str| {
+            let range = src.find(from).unwrap()..src.find('\n').unwrap();
+            let out = format!("{}{with}{}", &src[..range.start], &src[range.end..]);
+            let ins = range.start..range.start + with.len();
+            let edit = Edit {
+                range,
+                with: with.to_string(),
+            };
+            check(
+                Path::new("build.gradle"),
+                src,
+                &out,
+                &[edit],
+                &[ins],
+                &["GradleSpaceAssignment"],
+                &[],
+                None,
+                &|_| true,
+            )
+        };
+        let bad = Err("a space assignment would not become the same assignment");
+        // another property, another value, still a call, chained to the next part
+        assert_eq!(run("version 'a'\n", "v", "group = 'a'"), bad);
+        assert_eq!(run("version 'a'\n", "v", "version = 'b'"), bad);
+        assert_eq!(run("version 'a'\n", "v", "version('a')"), bad);
+        assert_eq!(
+            run("group 'a' version 'b'\n", "g", "group = 'a' version = 'b'"),
+            bad
+        );
+        assert_eq!(run("group 'a' version 'b'\n", "v", "version = 'b'"), bad);
+        assert_eq!(run("version 'a'\n", "v", "version = 'a'"), Ok(()));
     }
 
     #[test]

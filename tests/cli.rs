@@ -3649,7 +3649,7 @@ fn gradle_compile_is_fixed_only_with_its_replacement_configured() {
     d.write("build.gradle", src);
     let l = run(&d.0, &["--lint", "build.gradle"], None);
     assert!(
-        stdout(&l).contains("use api (`gradle_compile_replacement`) (not fixed: api needs the java-library plugin, which this file doesn't apply)\n"),
+        stdout(&l).contains("use api (`gradle_compile_replacement`) (not fixed: api needs the java-library or com.android.library plugin, which this file doesn't apply)\n"),
         "{}",
         stdout(&l)
     );
