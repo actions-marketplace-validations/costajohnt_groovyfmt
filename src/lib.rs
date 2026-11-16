@@ -511,9 +511,14 @@ mod tests {
     #[test]
     fn nul_byte_in_a_string_parses() {
         // in every string kind, and in a comment, which already parsed
-        let src = "def k = 'a' + '\0' + 'b'\ndef j = \"x\0y${k}\"\ndef t = '''\0'''\n// c\0\nprintln k\n";
+        let src =
+            "def k = 'a' + '\0' + 'b'\ndef j = \"x\0y${k}\"\ndef t = '''\0'''\n// c\0\nprintln k\n";
         let tree = super::parse(src);
-        assert!(!tree.root_node().has_error(), "{}", tree.root_node().to_sexp());
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
         let mut strings = Vec::new();
         super::preorder(tree.root_node(), |n| {
             if n.kind() == "string_literal" {
