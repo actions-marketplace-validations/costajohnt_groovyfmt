@@ -3608,3 +3608,31 @@ fn import_codenarc_arguments_and_exit_status() {
         assert_eq!(stdout(&o), "", "{args:?}");
     }
 }
+
+#[test]
+fn gradle_compile_is_fixed_only_with_its_replacement_configured() {
+    let d = Dir::new("gradle-compile");
+    let src = "dependencies {\n    compile 'a:b:1'\n    testCompile 'a:b:1'\n}\n";
+    d.write("build.gradle", src);
+    let l = run(&d.0, &["--lint", "build.gradle"], None);
+    let out = stdout(&l);
+    assert!(out.contains("`compile` configuration was removed in Gradle 7.0; use implementation (or api for dependencies your API exposes); --fix replaces it once `gradle_compile_replacement` is set under [lint]\n"), "{out}");
+    assert!(out.contains("use testImplementation (fixable)\n"), "{out}");
+    run(&d.0, &["--lint", "--fix", "build.gradle"], None);
+    assert_eq!(
+        d.read("build.gradle"),
+        "dependencies {\n    compile 'a:b:1'\n    testImplementation 'a:b:1'\n}\n"
+    );
+    d.write(
+        ".groovyfmt.toml",
+        "[lint]\ngradle_compile_replacement = \"api\"\n",
+    );
+    let l = run(&d.0, &["--lint", "build.gradle"], None);
+    assert!(stdout(&l).ends_with("[lint] (fixable)\n"), "{}", stdout(&l));
+    let f = run(&d.0, &["--lint", "--fix", "build.gradle"], None);
+    assert_eq!(f.status.code(), Some(0), "{}", stderr(&f));
+    assert_eq!(
+        d.read("build.gradle"),
+        "dependencies {\n    api 'a:b:1'\n    testImplementation 'a:b:1'\n}\n"
+    );
+}

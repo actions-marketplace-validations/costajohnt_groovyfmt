@@ -17,10 +17,11 @@ baseline = ".groovyfmt-baseline.json"   # lint reports only what isn't in it
 [lint]                      # rule = true/false; unlisted rules keep their default
 UnnecessaryGString = true
 UnusedImport = false
+gradle_compile_replacement = "implementation" # or "api": lets --fix replace Gradle's removed `compile`
 ```
 
 - `normalize_spacing` and `max_line_length` are described in [formatting](formatting.md).
-- `baseline` and the `[lint]` rule names are described in [lint](lint.md).
+- `baseline` and the `[lint]` rule names are described in [lint](lint.md), and so is `gradle_compile_replacement` ([fixing](lint.md#fixing)).
 
 Unknown keys and misspelled rule names are errors, so a typo can't silently do nothing. A config file can only fail the run when groovyfmt reaches a file or directory it governs. `-v` prints each config in use.
 

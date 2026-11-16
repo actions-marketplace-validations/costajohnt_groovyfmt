@@ -1,6 +1,6 @@
 # Lint
 
-`groovyfmt --lint` has 78 rules, 56 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
+`groovyfmt --lint` has 81 rules, 57 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
 
 The general rules are named after their [CodeNarc](https://codenarc.org/) equivalents, so existing configurations map across. The Jenkins, Gradle and Spock rules catch, in milliseconds, mistakes those tools otherwise report only when a build runs.
 
@@ -158,15 +158,20 @@ These apply in `*.gradle` files.
 
 | Rule | Default | Flags |
 |---|---|---|
-| GradleRemovedConfiguration | on | `compile`, `runtime`, `testCompile` or `testRuntime` dependencies, removed in Gradle 7.0 (the message names the replacement); not when the build declares a configuration of that name itself, or when the nearest `gradle/wrapper/gradle-wrapper.properties` (in the script's directory or above) pins a Gradle below 7.0, which still has them |
-| GradleJcenter | on | `jcenter()`, deprecated in Gradle 7.0 and removed in 9.0 |
-| GradleLeftShiftTask | on | `task name << { }`, removed in Gradle 5.0 |
+| GradleRemovedConfiguration | on | `compile`, `runtime`, `testCompile` or `testRuntime` dependencies, removed in Gradle 7.0 (the message names the replacement); not when the build declares a configuration of that name itself, or when the nearest `gradle/wrapper/gradle-wrapper.properties` (in the script's directory or above) pins a Gradle below 7.0, which still has them. Fixable ([fixing](#fixing)) |
+| GradleJcenter | on | `jcenter()`, deprecated in Gradle 7.0 and removed in 9.0. Fixable |
+| GradleLeftShiftTask | on | `task name << { }`, removed in Gradle 5.0. Fixable |
+| GradleSpaceAssignment | on | Groovy DSL space assignment, `name value` for `name = value`, which Gradle 8.12 deprecated and Gradle 10 removes: `description`, `group` or `version` setting the project's property (at the top level, or in `allprojects`, `subprojects` or `project(':x')`), or `description` or `group` in a task's block (`task x { }`, `task x(type: T) { }`, `task('x') { }`, `tasks.register`, `tasks.create` or `tasks.named`). Quiet when the nearest wrapper pins a Gradle before 8.12, and in `settings.gradle` and init scripts. Fixable |
+| GradleDependencyTuple | off | a dependency in map notation, `implementation group: 'a', name: 'b', version: '1'`, where the string `'a:b:1'` says the same: only `group`, `name` and `version` keys (`group` and `name` required), each a plain string. Gradle 9.1 deprecated this notation; off by default as a style choice for builds on older Gradle. Fixable |
+| GradleDependencyParentheses | off | a dependency in parentheses with no closure after it, `implementation('a:b:1')`, whose arguments (strings, names, dotted names, calls without a closure, named arguments, on one line) read the same without them (a style choice). Fixable |
 | GradleDynamicVersion | off | a `+` or `latest.*` dependency version (whether to pin is a policy choice) |
 | GradleRemovedApi | on | what a Gradle upgrade guide lists as removed, with the version and the replacement in the message: the `maven` plugin and the `uploadArchives` task (7.0, use `maven-publish`); the `findbugs`, `jdepend`, `osgi`, `announce`, `build-announcements` and `compare-gradle-builds` plugins (6.0) and the old JVM and JavaScript plugins (7.0); `configurations.compile`, `.runtime`, `.testCompile` and `.testRuntime` (7.0, unless the build declares that configuration); and `archiveName`, `baseName`, `classifier`, `destinationDir`, `appendix` or `extension` set in an archive task's block (8.0, use `archiveFileName`, `archiveBaseName` and so on). An archive task's block is `jar`, `war`, `ear`, `bootJar`, `bootWar`, `shadowJar`, `sourcesJar`, `javadocJar`, `distZip` or `distTar` at the top level (or in `allprojects`, `subprojects`, `project`, `configure`, `afterEvaluate` or `tasks`), or a task block typed `Jar`, `Zip`, `Tar`, `War`, `Ear`, `ShadowJar`, `BootJar` or `BootWar`. Quiet when the nearest wrapper pins a Gradle older than the removal |
 
 #### What the Gradle rules cover
 
 The rules read the build script and the nearest wrapper version; they do not invoke Gradle or require the project to configure successfully.
+
+GradleSpaceAssignment reports only properties known to be properties where the script's delegate is known. Gradle deprecated space assignment for every property, but a name can also be a real method (`id 'x' version '1'` in `plugins { }`, a plugin extension's own `name(String)`), which one file can't tell apart, so `description 'x'` in a `jar { }` block, `version '1'` in a publication and any other property are not reported. On the Groovy build scripts of 8 field-trial checkouts (6,171 `*.gradle` files), it reported 322 places; a fixed-seed sample of 40 had no false positives. The two dependency rules apply to the calls in a `dependencies { }` block other than `add`, `project`, `platform` and the handler's other methods; their samples of 40 (of 456 and 10,372 reports) had none either.
 
 Unused dependencies, undeclared dependencies, duplicate classes across jars and version recommendations all need the resolved dependency graph, so they are out of scope and require a linting tool that runs inside the Gradle build. Those tools and groovyfmt cover different ground and work alongside each other.
 
@@ -184,10 +189,18 @@ These apply in classes whose superclass is `Specification` or ends in `Spec` or 
 
 ## Fixing
 
-`groovyfmt --lint --fix` removes, in place, what four rules flag:
+`groovyfmt --lint --fix` fixes, in place, what these rules flag:
 
-- an `UnusedImport`, `DuplicateImport` or `ImportFromSamePackage` line, with its line break, and only when nothing but whitespace or a `;` shares the line
-- an `UnnecessarySemicolon` `;`
+- an `UnusedImport`, `DuplicateImport` or `ImportFromSamePackage` line is removed, with its line break, and only when nothing but whitespace or a `;` shares the line
+- an `UnnecessarySemicolon` `;` is removed
+- `GradleRemovedConfiguration`: `testCompile` becomes `testImplementation`, `runtime` becomes `runtimeOnly` and `testRuntime` becomes `testRuntimeOnly`. `compile` becomes `implementation` for most builds but `api` for a dependency a library's own API exposes, which only the build's author knows, so it is fixed only when the config's `[lint]` table names the replacement: `gradle_compile_replacement = "implementation"` (or `"api"`). Without it the report stays, and its message says so
+- `GradleJcenter`: a plain `jcenter()` line in a `repositories { }` block becomes `mavenCentral()`, or is removed when the block already has a plain `mavenCentral()`. `jcenter { ... }` is left as it is
+- `GradleLeftShiftTask`: `task name << { ... }` becomes `task name { doLast { ... } }`, the action kept as written (`task 'name' << { }` is left as it is)
+- `GradleSpaceAssignment`: `name value` becomes `name = value`
+- `GradleDependencyTuple`: the map becomes the string, `implementation 'a:b:1'`, with the values' quotes
+- `GradleDependencyParentheses`: the parentheses go, `implementation 'a:b:1'`
+
+A Gradle fix is made only where its report fires, so the wrapper version still decides: a build pinned to a Gradle that still has `testCompile` is left alone, as is a configuration the build declares itself.
 
 An import from the file's own package is removed only when the file declares no class of the same name. An `UnnecessaryGroovyImport` is never removed, since it can be what beats a same-named class in the package, which one file can't show.
 
@@ -203,8 +216,8 @@ fixed 4 violations in 1 files (DuplicateImport 1, UnnecessarySemicolon 2, Unused
 As with formatting, each fix is checked before the file is written:
 
 - the fixed file must parse cleanly
-- its tokens must be the original's minus exactly the removed ones
-- its parse tree must keep the original's shape, so removing a `;` can't join two statements or turn one into another's body
+- its tokens outside the fixed code must be the original's
+- its parse tree outside the fixed code must keep the original's shape, so removing a `;` can't join two statements or turn one into another's body, and a rewritten Gradle statement can't take in its neighbor
 - linting it must find the original's other violations and nothing new
 
 A file that fails a check is left as it was and listed as `path not fixed: <why>` on stderr. A file that doesn't parse is never fixed. Writes go through the same path as formatting, so symlinks, permissions, owners, hard links and `exclude` are handled the same way. Running it again changes nothing.

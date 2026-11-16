@@ -5,6 +5,8 @@
 ### Added
 
 - Lint rule `Groovy24EmptyElement` (on by default): an empty argument, list element or map entry, `foo(a,,b)`, `[a, , b]`, `[a: 1,, b: 2]`, which Groovy 2.4 drops and Groovy 3 and later reject. It is reported at each extra comma. ([#105](https://github.com/costajohnt/groovyfmt/issues/105))
+- Gradle lint rules from the build script's syntax alone ([#63](https://github.com/costajohnt/groovyfmt/issues/63)): `GradleSpaceAssignment` (on by default) reports Groovy DSL space assignment, `description 'x'` for `description = 'x'`, which Gradle 8.12 deprecated, for the project's `description`, `group` and `version` and a task's `description` and `group`, and is quiet under a wrapper older than 8.12. `GradleDependencyTuple` (off) reports a dependency in map notation that the string `'group:name:version'` says the same as (deprecated in Gradle 9.1), and `GradleDependencyParentheses` (off) a dependency in parentheses with no closure after it. All three are fixable. On 6,171 field-trial build scripts, fixed-seed samples of 40 reports per rule had no false positives.
+- `--lint --fix` fixes Gradle reports with a mechanical replacement ([#64](https://github.com/costajohnt/groovyfmt/issues/64)): `testCompile`, `runtime` and `testRuntime` become `testImplementation`, `runtimeOnly` and `testRuntimeOnly`; a plain `jcenter()` becomes `mavenCentral()`, or goes when the block has `mavenCentral()`; `task name << { }` becomes `task name { doLast { } }`. `compile` is fixed only with `gradle_compile_replacement = "implementation"` (or `"api"`) in the config's `[lint]` table, since only the build's author knows which; its message says so. Fixes can now replace code as well as delete it, under the same checks.
 
 ### Fixed
 
