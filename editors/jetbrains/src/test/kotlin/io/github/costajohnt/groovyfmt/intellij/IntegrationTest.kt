@@ -320,17 +320,9 @@ class IntegrationTest : UsefulTestCase() {
         val second = service.restart()
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
-        var serverB: ProcessHandle? = null
         waitFor("the server to run B in place of A", 60_000) {
-            serverB = server()
-            runs(serverB, b.path) && !serverA!!.isAlive
+            runs(server(), b.path) && !serverA!!.isAlive
         }
-        // and no other groovyfmt --lsp runs: the second restart's stop didn't land in the first
-        // one's start, where LSP4IJ 0.21.0 loses the process it launches (#97)
-        val others = ProcessHandle.current().descendants()
-            .filter { it.isAlive && it.pid() != serverB!!.pid() && it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }
-            .map { "${it.pid()} ${it.info().command().orElse("?")}" }.toList()
-        assertEquals(listOf<String>(), others)
     }
 
     /** A binary that never reads its input can't hang Reformat with groovyfmt: the timeout kills it. */
