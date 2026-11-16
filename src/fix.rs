@@ -552,7 +552,7 @@ mod tests {
             // #192: the grammar's `$name` is ASCII only, the net reads the whole string
             ("import a.B as Ä\nprintln \"$Ä.X\"\n", "import a.B as Ä"),
             ("import a.Café\nprintln \"$Café.v\"\n", "import a.Café"),
-            ("import a.Café\nprintln /$Café/\n", "import a.Café"),
+            ("import a.Café\nprintln(/$Café/)\n", "import a.Café"),
             (
                 "import static a.B.getRuntime as getRT\nprintln RT\n",
                 "import static a.B.getRuntime as getRT",

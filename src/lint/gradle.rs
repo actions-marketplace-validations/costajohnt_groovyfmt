@@ -988,19 +988,12 @@ fn space_assignment(
 fn shadowed(src: &str, s: Node, name: &str) -> bool {
     std::iter::successors(s.parent(), |p| p.parent()).any(|b| {
         statements(b).iter().any(|d| {
-            let mut found = false;
-            if matches!(
+            matches!(
                 d.kind(),
                 "local_variable_declaration" | "field_declaration" | "multi_assignment_declaration"
-            ) {
-                crate::preorder(*d, |x| {
-                    found |= x.kind() == "variable_declarator"
-                        && x.child_by_field_name("name")
-                            .is_some_and(|n| text(n, src) == name);
-                    !found
-                });
-            }
-            found
+            ) && super::unused::declarators(src, *d)
+                .iter()
+                .any(|(n, _)| *n == name)
         })
     })
 }
