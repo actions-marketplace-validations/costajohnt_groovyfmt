@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `--lint --fix` finds the fixes that fail its checks by halving instead of trying each fix alone, so a large file whose fixes fail together no longer takes quadratic time: halves of the failing set are checked and only failing halves are split again, about 2 log2(n) checks per failing fix instead of one per fix. On a 113 KB Spock spec with 1,003 UnnecessaryGString fixes, a release build took 23.6 s to refuse it and now takes 0.5 s; with one fix that fails alone, 23.5 s before and 1.1 s now, same output. The checks are unchanged. Fixes that fail only together, each passing alone, still leave the file as it was. ([#160](https://github.com/costajohnt/groovyfmt/issues/160))
+
 ## 0.20.0 (2026-11-16)
 
 ### Added
