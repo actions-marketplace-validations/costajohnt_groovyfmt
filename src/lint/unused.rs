@@ -229,6 +229,7 @@ pub(super) fn check(
     // the one returned. Not for Spock's feature (`def "adds"()`) and fixture methods, whose
     // value nothing reads.
     let mut returned = HashSet::new();
+    let mut parameters = HashSet::new();
     for n in nodes.iter().copied() {
         while scopes.last().is_some_and(|&end| end <= n.start_byte()) {
             scopes.pop();
@@ -255,6 +256,9 @@ pub(super) fn check(
             _ => None,
         };
         returned.extend(body.and_then(last_statement));
+        if n.kind() == "closure" {
+            parameters.extend(misparsed_parameters(n));
+        }
         match n.kind() {
             "field_declaration" | "method_declaration" => decls.push(n),
             "constructor_declaration" if is_method(src, n) => decls.push(n),
@@ -271,7 +275,7 @@ pub(super) fn check(
     // something reads it by reflection or a transform rewrites it
     decls.retain(|d| {
         (if d.kind() == "local_variable_declaration" {
-            scope_of.get(&d.id()).is_some_and(Option::is_some)
+            scope_of.get(&d.id()).is_some_and(Option::is_some) && !parameters.contains(&d.id())
         } else {
             has_modifier(*d, "private")
         }) && annotations(src, *d)
@@ -477,9 +481,6 @@ fn local(
     returned: bool,
     v: &mut Vec<Violation>,
 ) {
-    if closure_parameters(d) {
-        return;
-    }
     let names = declarators(src, d);
     let count = names.len();
     for (i, (name, n)) in names.into_iter().enumerate() {
@@ -505,15 +506,16 @@ fn local(
 }
 
 /// `{ List<String> a, String b -> }` parses as the local `List<String> a, String` and the
-/// lambda `b -> ...` (#182): `d` is that local, which holds a closure's parameters.
-fn closure_parameters(d: Node) -> bool {
-    d.parent().is_some_and(|p| p.kind() == "closure")
-        && d.prev_named_sibling().is_none()
+/// lambda `b -> ...` (#182): the id of that local, which holds `closure`'s parameters.
+fn misparsed_parameters(closure: Node) -> Option<usize> {
+    let d = closure.named_child(0)?;
+    (d.kind() == "local_variable_declaration"
         && d.next_named_sibling().is_some_and(|s| {
             s.kind() == "expression_statement"
                 && s.named_child(0)
                     .is_some_and(|l| l.kind() == "lambda_expression")
-        })
+        }))
+    .then(|| d.id())
 }
 
 /// The id of the last statement of a body, comments aside.
