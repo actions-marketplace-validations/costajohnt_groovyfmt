@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A closure's or block's whole body on one line that declares a variable with no value, `{ Foo bar }`, `{ x -> java.util.List l }`, `if (c) { Foo bar }`, is read as the declaration Groovy reads, not as the command call `Foo(bar)`, which it had been since 0.19.0. As in Groovy 2.4, 3 and 4, it is a declaration when the type's last part starts with a capital letter; `{ foo bar }`, `{ Foo.bar baz }`, `{ _Foo bar }` and `{ this.Foo bar }` stay command calls. Formatting is unchanged; lint rules see the declaration (UnusedVariable reports an unused one). The grammar pin moves to tree-sitter-groovy 7006b4e. ([#147](https://github.com/costajohnt/groovyfmt/issues/147))
+
 ## 0.20.0 (2026-11-16)
 
 ### Added
