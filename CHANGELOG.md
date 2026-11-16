@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- UnusedImport no longer reports, and `--lint --fix` no longer removes, a static import of an accessor used under a property name whose first two letters are capitals: `import static a.U.getSCOPES` used as `SCOPES`, `isACTIVE` as `ACTIVE`, `setURLX` as `URLX = x`, `getHTTPHost` as `HTTPHost`. Only `scopes` was tried. Removing it made a run fail with MissingPropertyException, or in a script silently wrote a binding variable instead of calling the setter. Each name is now tried as written and with its first letter lowercased, which covers every form Groovy 2.4.21, 3.0.25 and 4.0.24 resolve (also `get_foo` as `_foo`, `getaB` as `aB`, `getÄpfel` as `äpfel`, `get$d` as `$d`, which were not tried before). UnusedPrivateMethod reads private accessors the same way, and the fix checks' net from #165 refuses to remove an import whose property name is still used. ([#181](https://github.com/costajohnt/groovyfmt/issues/181))
+- UnusedVariable no longer reports the first parameter of a closure with a generic type followed by another typed parameter, `{ List<String> ctx, String m -> m }`. The grammar reads those parameters as a local declaration and a lambda; closure parameters are never reported. ([#182](https://github.com/costajohnt/groovyfmt/issues/182))
+
 ## 0.20.2 (2026-11-16)
 
 ### Fixed
