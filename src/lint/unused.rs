@@ -226,7 +226,8 @@ pub(super) fn check(
     let mut scopes: Vec<usize> = Vec::new();
     let mut scope_of = HashMap::new();
     // the last statement of each method (not `void`), closure and lambda body: its value is
-    // the one returned
+    // the one returned. Not for Spock's feature (`def "adds"()`) and fixture methods, whose
+    // value nothing reads.
     let mut returned = HashSet::new();
     for n in nodes.iter().copied() {
         while scopes.last().is_some_and(|&end| end <= n.start_byte()) {
@@ -236,7 +237,14 @@ pub(super) fn check(
             "method_declaration" | "constructor_declaration"
                 if (n.kind() == "method_declaration" || is_method(src, n))
                     && n.child_by_field_name("return_type")
-                        .is_none_or(|t| text(t, src) != "void") =>
+                        .is_none_or(|t| text(t, src) != "void")
+                    && n.child_by_field_name("name").is_some_and(|m| {
+                        m.kind() == "identifier"
+                            && !matches!(
+                                text(m, src),
+                                "setup" | "cleanup" | "setupSpec" | "cleanupSpec"
+                            )
+                    }) =>
             {
                 n.child_by_field_name("body")
             }
@@ -623,6 +631,9 @@ mod tests {
         // `void` methods, a constructor, a statement after it, the other names of the
         // declaration
         assert_eq!(rules(src, "UnusedVariable"), vec![12, 15, 19, 22]);
+        // Spock features and fixtures return nothing anyone reads
+        let src = "class S extends Specification {\n  def setup() {\n    def a = 1\n  }\n  def \"adds\"() {\n    expect:\n    true\n    def b = 1\n  }\n}\n";
+        assert_eq!(rules(src, "UnusedVariable"), vec![3, 8]);
     }
 
     #[test]
