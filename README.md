@@ -1,6 +1,4 @@
-<img src="https://raw.githubusercontent.com/costajohnt/groovyfmt/main/editors/vscode/icon.svg" width="96" height="96" alt="groovyfmt icon" align="right">
-
-# groovyfmt
+<img src="https://raw.githubusercontent.com/costajohnt/groovyfmt/main/docs/banner.png" width="100%" alt="groovyfmt: fast formatter and linter for Groovy, Gradle and Jenkinsfiles">
 
 A fast formatter and linter for Groovy, Gradle build scripts and Jenkinsfiles. One static binary, no JVM. Written in Rust on a [tree-sitter](https://tree-sitter.github.io/) grammar.
 
