@@ -242,6 +242,18 @@ fn check(
             return Err("a space assignment would not become the same assignment");
         }
     }
+    // A net under UnusedImport's own idea of a use (#165 slipped past it, and past the
+    // checks below, which compare trees, not names): a removed import's name must not be
+    // left as an identifier anywhere but the name or alias of another import.
+    let gone: Vec<&str> = edits
+        .iter()
+        .zip(calls)
+        .filter(|(_, r)| **r == "UnusedImport")
+        .flat_map(|(e, _)| import_symbols(src, b, &e.range))
+        .collect();
+    if !gone.is_empty() && identifiers(out, a).iter().any(|t| gone.contains(t)) {
+        return Err("a removed import's name is still used");
+    }
     if leaves(src, &before, &removed) != leaves(out, &after, inserted) {
         return Err("tokens other than the edited ones would change");
     }
@@ -290,6 +302,57 @@ fn check(
         return Err("other lint violations would change");
     }
     Ok(())
+}
+
+/// The names (alias, or the last part) of the imports inside `range`.
+fn import_symbols<'a>(src: &'a str, root: Node, range: &Range<usize>) -> Vec<&'a str> {
+    let mut v = Vec::new();
+    crate::preorder(root, |n| {
+        if n.end_byte() <= range.start || n.start_byte() >= range.end {
+            return false;
+        }
+        if n.kind() != "import_declaration" {
+            return true;
+        }
+        if range.start <= n.start_byte() && n.end_byte() <= range.end {
+            let name = n
+                .child_by_field_name("name")
+                .map_or("", |x| crate::text(x, src));
+            v.push(n.child_by_field_name("alias").map_or_else(
+                || name.rsplit('.').next().unwrap_or(name),
+                |a| crate::text(a, src),
+            ));
+        }
+        false
+    });
+    v
+}
+
+/// The identifiers of `src` (`"$Name"` included), except imports' names and aliases.
+fn identifiers<'a>(src: &'a str, root: Node) -> Vec<&'a str> {
+    let mut v = Vec::new();
+    crate::preorder(root, |n| {
+        let field = |f| n.parent().and_then(|p| p.child_by_field_name(f)) == Some(n);
+        if n.parent().is_some_and(|p| p.kind() == "import_declaration")
+            && (field("name") || field("alias"))
+        {
+            return false;
+        }
+        match n.kind() {
+            "identifier" | "type_identifier" => v.push(crate::text(n, src)),
+            "gstring_dollar_interpolation" => {
+                v.extend(
+                    crate::text(n, src)
+                        .trim_start_matches('$')
+                        .split('.')
+                        .next(),
+                );
+            }
+            _ => {}
+        }
+        true
+    });
+    v
 }
 
 /// Leaf tokens outside `removed`, as (kind, text).
@@ -379,6 +442,56 @@ mod tests {
         // a mention in a string is not a use
         assert_eq!(text("import a.Foo\nprintln 'a Foo'\n"), "println 'a Foo'\n");
         assert_eq!(text("import a.Foo\nprintln 'Foo'\n"), "println 'Foo'\n");
+    }
+
+    #[test]
+    fn an_import_whose_name_is_still_used_is_never_removed() {
+        // #165: the lint missed `@Gen` on a later import; whatever the lint thinks, removing
+        // an import whose name is left as an identifier fails the checks
+        let net = |src: &str, line: &str| {
+            let at = src.find(line).unwrap();
+            let e = Edit {
+                range: at..at + line.len() + 1,
+                with: String::new(),
+            };
+            let (out, ins) = apply(src, std::slice::from_ref(&e));
+            check(
+                Path::new("A.groovy"),
+                src,
+                &out,
+                &[e],
+                &ins,
+                &["UnusedImport"],
+                &[],
+                None,
+                &|_| true,
+            )
+        };
+        let gone = Err("a removed import's name is still used");
+        for (src, line) in [
+            ("import a.Gen\n@Gen\nimport b.T\nT.x()\n", "import a.Gen"),
+            (
+                "import a.Gen\n@Gen import static b.T.x\nx()\n",
+                "import a.Gen",
+            ),
+            ("import a.B as C\nC.go()\n", "import a.B as C"),
+            (
+                "import static a.B.go\ndef f(go) {}\n",
+                "import static a.B.go",
+            ),
+            ("import a.Foo\nprintln \"$Foo\"\n", "import a.Foo"),
+            ("import a.Foo\ndef x = (Foo) y\n", "import a.Foo"),
+        ] {
+            assert_eq!(net(src, line), gone, "{src:?}");
+        }
+        // in a string, a comment or another import's name: not a use
+        for src in [
+            "import a.Foo\nprintln 'Foo' // Foo\n",
+            "import a.Foo\nimport b.Foo\nx()\n",
+            "import a.Foo\nimport b.Bar as Foo\nx()\n",
+        ] {
+            assert_eq!(net(src, "import a.Foo"), Ok(()), "{src:?}");
+        }
     }
 
     #[test]

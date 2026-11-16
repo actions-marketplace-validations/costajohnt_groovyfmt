@@ -987,9 +987,26 @@ fn own_lines(src: &str, n: Node) -> Option<Edit> {
 fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
     let (mut decls, mut used) = (Vec::new(), HashSet::new());
     crate::preorder(tree.root_node(), |n| match n.kind() {
-        // don't descend: names inside imports aren't uses
+        // An import's own name and alias aren't uses, but its annotations are:
+        // `@Library('x') import y` uses the `Library` import (#165)
         "import_declaration" => {
             decls.push(n);
+            let mut c = n.walk();
+            for a in n.named_children(&mut c) {
+                if a.kind().contains("annotation") {
+                    crate::preorder(a, |m| {
+                        if m.kind().contains("comment") {
+                            used.extend(words(text(m, src)));
+                            false
+                        } else {
+                            if m.child_count() == 0 {
+                                used.insert(text(m, src));
+                            }
+                            true
+                        }
+                    });
+                }
+            }
             false
         }
         // a whole word in a comment ({@link Foo}) counts as a use, as in CodeNarc
@@ -1501,6 +1518,59 @@ mod tests {
         // a `$` in a single-quoted string is text
         let src = "import a.X\ndef s = '''\n\"${X}\"\n'''\n";
         assert_eq!(rules(src), vec![("UnusedImport", 1)]);
+    }
+
+    #[test]
+    fn annotation_on_an_import_is_a_use() {
+        // #165: JenkinsPipelineUnit's `@Library('x@main') import ...` uses `import ...Library`
+        for s in [
+            "import a.Gen\n@Gen\nimport b.T\nprintln T.S\n",
+            "import a.Gen\n@Gen import b.T\nprintln T.S\n",
+            "import a.Gen\n@Gen\nimport static b.T.S\nprintln S\n",
+            "import a.Gen\n@a.Gen\nimport b.T\nprintln T.S\n",
+            "import a.Lib\n@Lib('x@main') import b.T\nprintln T.S\n",
+            "import a.Ann\nimport a.Bar\n@Ann(Bar)\nimport b.T\nprintln T.S\n",
+            "import a.Out\nimport a.In\n@Out(@In(Bar.X))\nimport b.T\nimport a.Bar\nprintln T.S\n",
+        ] {
+            assert_eq!(rules(s), vec![], "{s}");
+        }
+        // the import's own name and alias still aren't uses of anything
+        assert_eq!(
+            rules("import a.T\n@Ann\nimport b.T as U\n"),
+            vec![("UnusedImport", 1)]
+        );
+    }
+
+    #[test]
+    fn names_used_elsewhere_are_uses() {
+        // audited for #165, all already counted: package annotations, annotation arguments,
+        // class literals, bounds, throws, instanceof, as, casts, catch, method references
+        for (import, usage) in [
+            ("import a.Ann", "@Ann\npackage p\nprintln 1"),
+            ("import a.Bar", "@Ann(Bar)\nclass X {}"),
+            ("import a.Bar", "@Ann(value = Bar.X)\nclass X {}"),
+            ("import a.In", "@Out(@In)\nclass X {}"),
+            ("import a.Bar", "@Ann(Bar.class)\nclass X {}"),
+            ("import a.Bar", "class X<T extends Bar> {}"),
+            ("import a.Bar", "def <T extends Bar> void f() {}"),
+            ("import a.Bar", "void f() throws Bar {}"),
+            ("import a.Bar", "if (x instanceof Bar) {}"),
+            ("import a.Bar", "def y = x as Bar"),
+            ("import a.Bar", "def y = (Bar) x"),
+            ("import a.Bar", "List<Bar> l = []"),
+            ("import a.Bar", "try {} catch (Foo | Bar e) {}"),
+            ("import a.Bar", "def y = Bar::m"),
+            ("import a.Bar", "def f(Bar... b) {}"),
+            ("import a.Bar", "class X { void f(@Bar x) {} }"),
+            ("import static a.B.c", "c()"),
+        ] {
+            let src = format!("{import}\n{usage}\n");
+            let unused: Vec<_> = rules(&src)
+                .into_iter()
+                .filter(|r| r.0 == "UnusedImport")
+                .collect();
+            assert_eq!(unused, vec![], "{src:?}");
+        }
     }
 
     #[test]

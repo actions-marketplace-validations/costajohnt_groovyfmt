@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- UnusedImport no longer reports, and `--lint --fix` no longer removes, an import whose class is used only as an annotation on another import, `import a.Gen` with `@Gen import b.T`, or JenkinsPipelineUnit's `import ...lib.Library` with `@Library('x@main') import ...` (also `@Gen import static ...`, `@a.Gen`, and names in the annotation's arguments). Removing it broke compilation. The fix checks now also refuse to remove an import whose name is still a name anywhere else in the file (outside strings, comments and other imports' names), whatever UnusedImport makes of it. Other places a name can be used (package annotations, annotation arguments, class literals, bounds, `throws`, `instanceof`, `as`, casts, `catch`, method references, `{@link}`, `"${X.y}"`) were checked and already counted. ([#165](https://github.com/costajohnt/groovyfmt/issues/165))
 - `--lint --fix` finds the fixes that fail its checks by halving instead of trying each fix alone, so a large file whose fixes fail together no longer takes quadratic time: halves of the failing set are checked and only failing halves are split again, about 2 log2(n) checks per failing fix instead of one per fix. On a 113 KB Spock spec with 1,003 UnnecessaryGString fixes, a release build took 23.6 s to refuse it and now takes 0.5 s; with one fix that fails alone, 23.5 s before and 1.1 s now, same output. The checks are unchanged. Fixes that fail only together, each passing alone, still leave the file as it was. ([#160](https://github.com/costajohnt/groovyfmt/issues/160))
 
 ## 0.20.0 (2026-11-16)

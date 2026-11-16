@@ -14,7 +14,7 @@ Turn a rule on or off in the `[lint]` table of [`.groovyfmt.toml`](configuration
 
 | Rule | Default | Flags |
 |---|---|---|
-| UnusedImport | on | an import whose name (or alias) never appears in code or as a word in a comment; not an annotated import (`@Library`, `@Grab`), which is there for its annotation. A static import of `getX`, `setX` or `isX` counts as used where the property `x` appears |
+| UnusedImport | on | an import whose name (or alias) never appears in code (annotations on other imports included, `@Library('x') import ...`) or as a word in a comment; not an annotated import (`@Library`, `@Grab`), which is there for its annotation. A static import of `getX`, `setX` or `isX` counts as used where the property `x` appears |
 | DuplicateImport | on | the same import twice |
 | UnnecessarySemicolon | on | a `;` at the end of a line, unless the next line starts with `{` (without the `;` that closure would become an argument of the statement before), `++` or `--` |
 | EmptyCatchBlock | on | an empty `catch`, unless the parameter is named `ignore` or `ignored` |
@@ -235,6 +235,7 @@ As with formatting, each fix is checked before the file is written:
 - the fixed file must parse cleanly
 - its tokens outside the fixed code must be the original's
 - its parse tree outside the fixed code must keep the original's shape, so removing a `;` can't join two statements or turn one into another's body, and a rewritten Gradle statement can't take in its neighbor
+- a removed `UnusedImport`'s name (or alias) must not be left as a name anywhere in the file outside strings, comments and other imports' names
 - linting it must find the original's other violations and nothing new
 
 A file that fails a check is left as it was and listed as `path not fixed: <why>` on stderr. A file that doesn't parse is never fixed. Writes go through the same path as formatting, so symlinks, permissions, owners, hard links and `exclude` are handled the same way. Running it again changes nothing.
