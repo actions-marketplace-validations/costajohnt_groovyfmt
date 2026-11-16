@@ -983,6 +983,43 @@ fn own_lines(src: &str, n: Node) -> Option<Edit> {
     )
 }
 
+/// A `qualified_name` as Groovy reads it, from its identifiers: without the spaces, line
+/// breaks and comments the source may have around its dots (`a.b. C` is `a.b.C`, #171).
+pub(crate) fn dotted(n: Node, src: &str) -> String {
+    let mut c = n.walk();
+    let parts: Vec<&str> = n
+        .named_children(&mut c)
+        .filter(|p| p.kind() == "identifier")
+        .map(|p| text(p, src))
+        .collect();
+    parts.join(".")
+}
+
+/// An import's name as Groovy reads it (see `dotted`), its alias, or else its last part: the
+/// simple name it brings into the file.
+pub(crate) fn import_name<'a>(d: Node, src: &'a str) -> (String, &'a str) {
+    let name = d.child_by_field_name("name");
+    let symbol = d.child_by_field_name("alias").map_or_else(
+        || {
+            name.and_then(|n| {
+                let mut c = n.walk();
+                n.named_children(&mut c)
+                    .filter(|p| p.kind() == "identifier")
+                    .last()
+            })
+            .map_or("", |p| text(p, src))
+        },
+        |a| text(a, src),
+    );
+    (name.map_or_else(String::new, |n| dotted(n, src)), symbol)
+}
+
+/// Whether import `d` has the keyword or token `t` (`static`, `.*`).
+pub(crate) fn import_has(d: Node, t: &str) -> bool {
+    let mut c = d.walk();
+    d.children(&mut c).any(|k| !k.is_named() && k.kind() == t)
+}
+
 /// UnusedImport + DuplicateImport.
 fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
     let (mut decls, mut used) = (Vec::new(), HashSet::new());
@@ -1037,11 +1074,27 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
     });
     let mut seen = HashSet::new();
     for d in decls {
-        let full = text(d, src)
-            .trim_end_matches(';')
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let (name, symbol) = import_name(d, src);
+        let alias = d.child_by_field_name("alias").map(|a| text(a, src));
+        let star = import_has(d, ".*");
+        // as Groovy reads it, so `import a.b. C` and `import a.b.C` are the same (#171); the
+        // annotations as written
+        let kw = d.children(&mut d.walk()).find(|k| k.kind() == "import");
+        let annotations = kw.map_or("", |k| &src[d.start_byte()..k.start_byte()]);
+        let full = format!(
+            "{}import {}{name}{}{}",
+            annotations
+                .split_whitespace()
+                .map(|w| format!("{w} "))
+                .collect::<String>(),
+            if import_has(d, "static") {
+                "static "
+            } else {
+                ""
+            },
+            if star { ".*" } else { "" },
+            alias.map_or_else(String::new, |a| format!(" as {a}")),
+        );
         // `@Library('lib') import x` and `@Grab(...) import y` are there for the annotation:
         // never unused, and never removed
         let annotated = text(d, src).starts_with('@');
@@ -1053,15 +1106,12 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
             });
             continue;
         }
-        let name = d.child_by_field_name("name").map_or("", |n| text(n, src));
-        if name.ends_with('*') || full.ends_with(".*") || annotated {
+        if star || annotated {
             continue;
         }
-        let alias = d.child_by_field_name("alias").map(|a| text(a, src));
-        let symbol = alias.unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name));
         // `import static a.B.getFoo` also serves the property `foo` (Groovy's
         // StaticImportVisitor looks up getFoo / setFoo for it)
-        let property_used = full.starts_with("import static ")
+        let property_used = import_has(d, "static")
             && unused::property(symbol).is_some_and(|p| used.contains(unused::lcfirst(p).as_str()));
         if !symbol.is_empty() && !used.contains(symbol) && !property_used {
             v.push(Violation {
@@ -1485,6 +1535,77 @@ mod tests {
         assert_eq!(
             rules(src),
             vec![("UnusedImport", 2), ("DuplicateImport", 3)]
+        );
+    }
+
+    #[test]
+    fn import_names_are_read_without_spaces_or_comments_around_dots() {
+        // #171: the name was the text after the last `.`, ` TimeUnit` here, so a used import
+        // was reported, and --fix deleted it
+        let forms = [
+            "import java.util.concurrent. TimeUnit",
+            "import java.util.concurrent .TimeUnit",
+            "import java.util.concurrent . TimeUnit",
+            "import java.util.concurrent.\tTimeUnit",
+            "import java.util.concurrent.\n    TimeUnit",
+            "import java.util.concurrent\n    .TimeUnit",
+            "import java. util . concurrent. TimeUnit",
+            "import java.util.concurrent./* c */TimeUnit",
+            "import java.util.concurrent. // c\n TimeUnit",
+        ];
+        for f in forms {
+            let src = format!("{f}\nTimeUnit t = TimeUnit.SECONDS\n");
+            assert_eq!(rules(&src), vec![], "{src:?}");
+            // the same import twice, however it is spaced
+            let src = format!("{f}\nimport java.util.concurrent.TimeUnit\nTimeUnit t\n");
+            assert_eq!(
+                rules(&src),
+                vec![("DuplicateImport", 2 + f.matches('\n').count())],
+                "{src:?}"
+            );
+            // and unused, named as Groovy reads it
+            let vs = lint(&format!("{f}\nx()\n")).unwrap();
+            assert_eq!(
+                vs.iter().map(|v| v.message.as_str()).collect::<Vec<_>>(),
+                vec!["The [java.util.concurrent.TimeUnit] import is never referenced"],
+                "{f:?}"
+            );
+        }
+        for (import, usage) in [
+            (
+                "import static java.util.concurrent.TimeUnit. SECONDS",
+                "println SECONDS",
+            ),
+            (
+                "import static java.util.concurrent.TimeUnit .SECONDS",
+                "println SECONDS",
+            ),
+            (
+                "import static java.util.concurrent.TimeUnit.\n  SECONDS",
+                "println SECONDS",
+            ),
+            ("import static a.U. getSvc", "svc.go()"),
+            ("import a.b. C as D", "D d = null"),
+            ("import a.b.C as\n D", "D d = null"),
+            ("import a.b .*", "x()"),
+            ("import static a.B\n.*", "x()"),
+        ] {
+            let src = format!("{import}\n{usage}\n");
+            assert_eq!(rules(&src), vec![], "{src:?}");
+        }
+        // an alias, star or static import is a duplicate only of the same alias, star or
+        // static import, however spaced
+        assert_eq!(
+            rules("import a.b .*\nimport a.b.*\nimport static a.b.*\nx()\n"),
+            vec![("DuplicateImport", 2)]
+        );
+        assert_eq!(
+            rules("import a.b. C as D\nimport a.b.C as D\nimport a.b.C as E\nD d; E e\n"),
+            vec![("DuplicateImport", 2)]
+        );
+        assert_eq!(
+            rules("import static a.B. c\nimport static a.B.c\nimport a.B.c\nc()\n"),
+            vec![("DuplicateImport", 2)]
         );
     }
 
