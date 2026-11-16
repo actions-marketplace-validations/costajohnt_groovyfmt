@@ -232,7 +232,7 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                 .is_some_and(|n| text(n, src) == "call")
     }) {
         if let Some(body) = m.child_by_field_name("body") {
-            step_pipelines(src, body, v);
+            step_pipelines(src, body, 0, v);
         }
     }
 }
@@ -240,12 +240,15 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
 /// The pipelines in a `call` method's body, directly or in the branches of an `if`, the way a
 /// step picks one of several (`if (type == 'web') { pipeline { } } else { pipeline { } }`).
 /// One in a closure, a loop or a `try` is left alone.
-fn step_pipelines(src: &str, n: Node, v: &mut Vec<Violation>) {
+fn step_pipelines(src: &str, n: Node, depth: usize, v: &mut Vec<Violation>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
     let mut c = n.walk();
     for s in n.named_children(&mut c) {
         match s.kind() {
             "pipeline_statement" => pipeline(src, s, v),
-            "block" | "if_statement" => step_pipelines(src, s, v),
+            "block" | "if_statement" => step_pipelines(src, s, depth + 1, v),
             _ => {}
         }
     }
@@ -1226,6 +1229,15 @@ mod tests {
             "def call(body) {{\n def config = [:]\n body.resolveStrategy = Closure.DELEGATE_FIRST\n body.delegate = config\n body()\n{VALID}}}\n"
         );
         assert_eq!(jenkins("vars/build.groovy", &valid), vec![]);
+        // nested `if`s: checked 3 deep, not 5,000 deep, and no stack overflow
+        for (n, found) in [(3, 2), (5_000, 0)] {
+            let src = format!(
+                "def call(c) {{\n{}{bad}{}\n}}\n",
+                "if (c) { ".repeat(n),
+                " }".repeat(n)
+            );
+            assert_eq!(jenkins("vars/build.groovy", &src).len(), found, "{n}");
+        }
         // each branch of an `if` that picks a pipeline, not the condition
         let branches = format!(
             "def call(String type) {{\n if (type == 'a') {{\n {bad}\n }} else if ({{ -> pipeline {{ }} }}) {{\n {bad}\n }} else {{ {bad} }}\n}}\n"
