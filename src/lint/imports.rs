@@ -8,7 +8,7 @@
 //! class of the same name, which one file can't show, so that rule reports but doesn't fix.
 //! Only capitalized names: Groovy resolves a lowercase class name through imports alone.
 
-use super::{Violation, at, own_lines};
+use super::{Violation, at, dotted, import_has, import_name, own_lines};
 use crate::text;
 use std::collections::HashSet;
 use std::path::Path;
@@ -48,7 +48,7 @@ pub(super) fn check(path: &Path, src: &str, nodes: &[Node], v: &mut Vec<Violatio
         .iter()
         .find(|n| n.kind() == "package_declaration")
         .and_then(|p| p.child_by_field_name("name"))
-        .map(|n| text(n, src));
+        .map(|n| dotted(n, src));
     let imports: Vec<Node> = top
         .iter()
         .copied()
@@ -66,27 +66,23 @@ pub(super) fn check(path: &Path, src: &str, nodes: &[Node], v: &mut Vec<Violatio
     }
     // star imports other than the defaults can hold a class of the same simple name
     let other_stars = imports.iter().any(|d| {
-        let t = text(*d, src);
-        let name = d.child_by_field_name("name").map_or("", |n| text(n, src));
-        !t.contains("static")
-            && (t.trim_end_matches(';').trim_end().ends_with(".*"))
-            && !DEFAULT_PACKAGES.contains(&name)
-            && Some(name) != package
+        let name = import_name(*d, src).0;
+        !import_has(*d, "static")
+            && import_has(*d, ".*")
+            && !DEFAULT_PACKAGES.contains(&name.as_str())
+            && package.as_ref() != Some(&name)
     });
     for d in imports {
         let t = text(d, src);
         // `import static`, `import a.B as C` and `@Grab(...) import x` are there for more
         // than the name
-        if t.starts_with('@')
-            || d.child_by_field_name("alias").is_some()
-            || t.split_whitespace().nth(1) == Some("static")
+        if t.starts_with('@') || d.child_by_field_name("alias").is_some() || import_has(d, "static")
         {
             continue;
         }
-        let Some(name) = d.child_by_field_name("name").map(|n| text(n, src)) else {
-            continue;
-        };
-        let star = t.trim_end_matches(';').trim_end().ends_with(".*");
+        let name = import_name(d, src).0;
+        let name = name.as_str();
+        let star = import_has(d, ".*");
         let (pkg, class) = if star {
             (name, None)
         } else {
@@ -100,7 +96,7 @@ pub(super) fn check(path: &Path, src: &str, nodes: &[Node], v: &mut Vec<Violatio
         } else {
             name.to_string()
         };
-        if Some(pkg) == package {
+        if package.as_deref() == Some(pkg) {
             let fix = own_lines(src, d).filter(|_| class.is_none_or(|c| !declared.contains(c)));
             v.push(Violation {
                 fix,
@@ -183,5 +179,23 @@ mod tests {
         );
         // no package: nothing is the same package
         assert_eq!(rules("import C\n"), vec![]);
+    }
+
+    #[test]
+    fn names_are_read_without_spaces_around_dots() {
+        // #171
+        assert_eq!(
+            rules(
+                "package a. b\nimport a.b. C\nimport a .b .*\nimport java.util. Date\nimport java .util .*\n"
+            ),
+            vec![
+                ("ImportFromSamePackage", 2, true),
+                ("ImportFromSamePackage", 3, true),
+                ("UnnecessaryGroovyImport", 4, false),
+                ("UnnecessaryGroovyImport", 5, false),
+            ]
+        );
+        // a package named like `static` is not a static import
+        assert_eq!(rules("import a.statics.*\nimport java.util.Date\n"), vec![]);
     }
 }
