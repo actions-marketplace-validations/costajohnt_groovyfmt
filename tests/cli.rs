@@ -1091,7 +1091,7 @@ fn explain_describes_one_rule() {
     d.write(".groovyfmt.toml", "[lint]\nUnnecessaryGString = true\n");
     let o = run(&d.0, &["--explain=unnecessarygstring"], None);
     assert!(
-        stdout(&o).contains("On by default: no. Here: on. Not fixed automatically.")
+        stdout(&o).contains("On by default: no. Here: on. `groovyfmt --lint --fix` fixes it.")
             && stdout(&o).ends_with(
                 "Turn it off in .groovyfmt.toml:\n    [lint]\n    UnnecessaryGString = false\n"
             ),
