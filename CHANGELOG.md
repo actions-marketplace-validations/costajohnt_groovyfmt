@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- A directory walk enters a `build` package in a source set outside `src`, `test/groovy/org/acme/build` or `integrationTest/groovy/org/acme/build`, and a Jenkins shared library's `vars/build`, in a project with a build file. They were skipped as Gradle output, so their files were never checked; only a `build` under `src` was entered (#83, #98). A `build` under a `groovy` or `vars` directory is now source too; one beside a build file (`build`, `sub/build`) or elsewhere (`ci/build`) is still skipped. ([#173](https://github.com/costajohnt/groovyfmt/issues/173))
+- A chain of elvis or ternary operators over several lines, `a ?:` / `b ?:` / `c`, keeps all its links at one continuation indent, as a chain of `||` or `+` does, in both formatting modes. Each link was indented one more step than the one before. ([#174](https://github.com/costajohnt/groovyfmt/issues/174))
 - A closure's last parameter with a bare name as its default, `{ a, Map<String, String> m = h -> m }`, `{ String a = 'x', List<String> e = g -> e }`, parses, as Groovy 2.4, 3 and 4 read it: the `->` after the name is the closure's, not a lambda `h -> m` in the default. Files with one were skipped. In first position, `{ List<String> e = g -> e }` or `{ e = g -> e }`, it had parsed as a body declaring or assigning a lambda; it is now the parameter, so lint rules see the parameter and the body. Formatting of those is unchanged. A default that only ends in a name, `{ a, e = x + g -> e }`, is not covered yet. The grammar pin moves to tree-sitter-groovy 1e89f8f. ([#166](https://github.com/costajohnt/groovyfmt/issues/166))
 
 ## 0.20.1 (2026-11-16)

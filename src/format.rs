@@ -464,6 +464,14 @@ fn indent_for(
         }
         _ => a.start_position().row,
     };
+    // Elvis and ternary are right-associative, so each link of a chain (`a ?:` / `b ?:` /
+    // `c`) is the last operand of the one before: indent all links from the chain's first
+    // line, as a left-associative `||` or `+` chain is, not each from the link above (#174).
+    let mut j = i - 1;
+    while j > 0 && chain_link(path[j].0, path[j - 1].0) {
+        j -= 1;
+        anchor_row = path[j].0.start_position().row;
+    }
     // A `{` opened on the line where a multi-line string ends (`foo(x: '''` ... `''') {`):
     // that line's indent is the string's text, so indent from the statement around it (#144).
     if verbatim.get(anchor_row) == Some(&true)
@@ -522,6 +530,17 @@ fn indent_for(
     } else {
         style.continuation.unwrap_or(step)
     }
+}
+
+/// Whether `n` is the last operand (`?:`'s default, `? :`'s alternative) of elvis or
+/// ternary `parent`, itself an elvis or ternary: the next link of a chain.
+fn chain_link(n: Node, parent: Node) -> bool {
+    let conditional = |k: &str| matches!(k, "elvis_expression" | "ternary_expression");
+    conditional(n.kind())
+        && conditional(parent.kind())
+        && ["default", "alternative"]
+            .iter()
+            .any(|f| parent.child_by_field_name(f) == Some(n))
 }
 
 /// Leaf tokens as (kind, text). Only comments are compared without trailing whitespace,
@@ -639,6 +658,22 @@ mod tests {
         let src = "switch (x) {\ncase 1:\nlist.find { d ->\nprintln d\n}\nbreak\n}\n";
         let want = "switch (x) {\n    case 1:\n        list.find { d ->\n            println d\n        }\n        break\n}\n";
         assert_eq!(fmt(src), want);
+    }
+
+    #[test]
+    fn elvis_and_ternary_chains_stay_flat() {
+        // #174: each link was indented from the one above, a staircase
+        let src = "def v = a ?:\nb ?:\nc ?:\nd\ndef w = a\n?: b\n?: c\nfoo(a ?:\nb ?:\nc)\ndef t = a ?\nb :\nc ?\nd : e\nif (x) {\nr = m[k] ?:\nf(1,\n2) ?:\nz\n}\n";
+        let want = "def v = a ?:\n    b ?:\n    c ?:\n    d\ndef w = a\n    ?: b\n    ?: c\nfoo(a ?:\n    b ?:\n    c)\ndef t = a ?\n    b :\n    c ?\n    d : e\nif (x) {\n    r = m[k] ?:\n        f(1,\n            2) ?:\n        z\n}\n";
+        assert_eq!(fmt(src), want);
+        let spaced = Style {
+            normalize_spacing: true,
+            ..Style::default()
+        };
+        assert_eq!(format(src, &spaced), Outcome::Formatted(want.to_string()));
+        // a nested conditional that isn't the last operand is not a link
+        let src = "def v = a ?\nb ?:\nc :\nd\n";
+        assert_eq!(fmt(src), "def v = a ?\n    b ?:\n        c :\n    d\n");
     }
 
     #[test]
