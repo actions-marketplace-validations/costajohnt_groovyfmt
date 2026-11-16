@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- The Jenkins lint rules check the declarative pipelines of shared library steps: a `pipeline { }` in a top-level `call` method of a `.groovy` file directly in a `vars` directory, directly in the method's body (after any other statements) or in an `if` branch there, with reports at its lines in the file. Before, only a Jenkinsfile or a file whose first statement is `pipeline { }` was checked, which missed most declarative pipelines in shared libraries. Jenkinsfiles are checked as before. On 922 step files in field-trial clones of shared libraries, all 32 pipelines in them (in 28 files, 14 of them in `if` branches) are now checked, with no reports.
+- `--lint --fix` fixes `Groovy24EmptyElement` by removing the extra comma (`foo(a,,b)` becomes `foo(a,b)`, the call Groovy 2.4 already compiled, now valid on Groovy 3 and 4; only a lone empty element without a trailing comma, the one form 2.4 accepts), and `UnnecessaryGString`, when turned on, by single-quoting the string (`"x"` becomes `'x'`, the same String constant; not a string with a `\u` escape). A report whose message quotes code a fix rewrites (`"a" == "b"`) no longer makes the fix fail its checks.
+
 ### Fixed
 
 - The grammar pin moves to tree-sitter-groovy c32f931. Newly accepted, as Groovy reads them: a `final` declaration with a type and names without values, `final String a, b`, `final int c, d` ([#155](https://github.com/costajohnt/groovyfmt/issues/155)); `final String a` alone is now one typed declaration, where the type was read as the name and the name as a statement of its own. An annotated `final` declaration as the first statement of an `if`, `while` or `for` block, `@Nullable final x = g()`, which was read as a closure's parameter ([#156](https://github.com/costajohnt/groovyfmt/issues/156)). A dotted generic array type after `as` or `instanceof`, `as java.nio.file.WatchEvent.Kind<?>[]`, `instanceof Map.Entry<K, V>[]` ([#157](https://github.com/costajohnt/groovyfmt/issues/157)).
