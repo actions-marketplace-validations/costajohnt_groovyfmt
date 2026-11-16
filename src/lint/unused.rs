@@ -453,7 +453,7 @@ pub(super) fn lcfirst(s: &str) -> String {
 }
 
 /// The names a field or local declaration declares, with the node of each name.
-fn declarators<'a>(src: &'a str, d: Node<'a>) -> Vec<(&'a str, Node<'a>)> {
+pub(super) fn declarators<'a>(src: &'a str, d: Node<'a>) -> Vec<(&'a str, Node<'a>)> {
     if let Some(n) = d.child_by_field_name("name") {
         return vec![(text(n, src), n)];
     }

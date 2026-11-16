@@ -1067,23 +1067,23 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
             false
         }
         _ => {
+            // The grammar leaves some interpolations as plain text: `"""` holding
+            // `"${Name.x}"`, and `$Café.v` or `$Ä`, as its `$name` is ASCII only (#192). Count
+            // the names after each unescaped `$` of the whole string.
+            if n.kind() == "string_literal" && !text(n, src).starts_with('\'') {
+                dollar_names(text(n, src), &mut used);
+            }
             if n.child_count() == 0 {
-                let t = text(n, src);
-                used.insert(t);
-                // The grammar sometimes leaves a GString's interpolations as plain text, as in
-                // `"""` holding `"${Name.x}"`: count the names after each unescaped `$`.
-                if n.kind() == "string_fragment"
-                    && t.contains('$')
-                    && n.parent().is_some_and(|p| !text(p, src).starts_with('\''))
-                {
-                    dollar_names(t, &mut used);
-                }
+                used.insert(text(n, src));
             }
             true
         }
     });
+    // Hubitat appends an `#include`d library to the file, and the library uses the file's
+    // imports, so in such a file none can be removed (#192)
+    let include = hubitat_include(src, tree.root_node());
     let mut seen = HashSet::new();
-    for d in decls {
+    for d in decls.iter().copied() {
         let (name, symbol) = import_name(d, src);
         let alias = d.child_by_field_name("alias").map(|a| text(a, src));
         let star = import_has(d, ".*");
@@ -1108,10 +1108,14 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
         // `@Library('lib') import x` and `@Grab(...) import y` are there for the annotation:
         // never unused, and never removed
         let annotated = text(d, src).starts_with('@');
-        let fix = own_lines(src, d).filter(|_| !annotated);
+        let fix = own_lines(src, d).filter(|_| !annotated && !include);
         if !seen.insert(full.clone()) {
+            // The last import of a simple name wins, so with another import of the name
+            // between the copies, `import p.A` / `import q.A` / `import p.A`, removing the
+            // later copy switches the class (#192): leave them all
+            let rebinds = !star && rebound(src, &decls, d);
             v.push(Violation {
-                fix,
+                fix: fix.filter(|_| !rebinds),
                 ..at(d, "DuplicateImport", format!("Duplicate import: {full}"))
             });
             continue;
@@ -1142,14 +1146,46 @@ fn imports(src: &str, tree: &Tree, v: &mut Vec<Violation>) {
     }
 }
 
+/// Whether an import other than a copy of `d`, and not a `.*` one, brings in the simple
+/// name (or alias) `d` does: then which class the name means hangs on their order.
+pub(crate) fn rebound(src: &str, decls: &[Node], d: Node) -> bool {
+    let (name, symbol) = import_name(d, src);
+    decls.iter().any(|&e| {
+        let (n, s) = import_name(e, src);
+        !import_has(e, ".*")
+            && s == symbol
+            && (n != name || import_has(e, "static") != import_has(d, "static"))
+    })
+}
+
+/// Whether the file has a Hubitat `#include ns.Library` line (the grammar reads it as a
+/// comment).
+pub(crate) fn hubitat_include(src: &str, root: Node) -> bool {
+    let mut found = false;
+    if src.contains("#include") {
+        crate::preorder(root, |n| {
+            found |= n.kind().contains("comment") && text(n, src).starts_with("#include");
+            !found
+        });
+    }
+    found
+}
+
 /// The identifier-like words in `s`.
 fn words(s: &str) -> impl Iterator<Item = &str> {
     s.split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
 }
 
-/// The names after each unescaped `$` in GString text: `$a.b`, and every word in `${...}`.
-fn dollar_names<'a>(t: &'a str, used: &mut HashSet<&'a str>) {
+/// A character Java may allow in a name (`isJavaIdentifierPart`): wider than `words`, with
+/// combining marks and currency signs, so both splits are counted.
+fn java_part(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
+}
+
+/// The names after each unescaped `$` in GString text: `$a.b`, and every word in `${...}`,
+/// Unicode ones included (`$Café.v`, #192).
+pub(crate) fn dollar_names<'a>(t: &'a str, used: &mut impl Extend<&'a str>) {
     let b = t.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -1168,10 +1204,15 @@ fn dollar_names<'a>(t: &'a str, used: &mut HashSet<&'a str>) {
                         .unwrap_or(b.len())
                 } else {
                     t[start..]
-                        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                        .find(|c: char| !(java_part(c) || c == '.'))
                         .map_or(b.len(), |k| start + k)
                 };
                 used.extend(words(&t[start..end]));
+                used.extend(
+                    t[start..end]
+                        .split(|c| !java_part(c))
+                        .filter(|w| !w.is_empty()),
+                );
                 i = end;
             }
             _ => i += 1,
@@ -1982,6 +2023,35 @@ mod tests {
         assert_eq!(
             (v[0].rule, v[0].line, v[0].col, v[0].end_line, v[0].end_col),
             ("EmptyCatchBlock", 1, 13, 2, 2)
+        );
+    }
+
+    #[test]
+    fn imports_an_include_or_another_import_may_need_are_reported_but_not_fixed() {
+        // #192: Hubitat appends the `#include`d library, which uses the file's imports;
+        // the last import of a name wins, so removing one can switch the class
+        let fixes = |src: &str| -> Vec<(&'static str, usize, bool)> {
+            lint(src)
+                .expect("parses")
+                .into_iter()
+                .map(|v| (v.rule, v.line, v.fix.is_some()))
+                .collect()
+        };
+        assert_eq!(
+            fixes("import a.B\nimport c.D\nimport c.D\nmetadata { }\n#include x.y\n"),
+            vec![
+                ("UnusedImport", 1, false),
+                ("UnusedImport", 2, false),
+                ("DuplicateImport", 3, false)
+            ]
+        );
+        assert_eq!(
+            fixes("import p.A\nimport q.A\nimport p.A\nA.v\n"),
+            vec![("DuplicateImport", 3, false)]
+        );
+        assert_eq!(
+            fixes("import p.A\nimport p.A\nimport q.B\nA.v\nB.v\n"),
+            vec![("DuplicateImport", 2, true)]
         );
     }
 
