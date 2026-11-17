@@ -1,6 +1,6 @@
 # Lint
 
-`groovyfmt --lint` has 81 rules, 57 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
+`groovyfmt --lint` has 82 rules, 58 of them on by default. `groovyfmt --rules` lists them with their state under the config that applies, and `groovyfmt --explain <Rule>` prints a rule's description, why it matters, flagged code and a fixed version, whether `--lint --fix` fixes it, and the `.groovyfmt.toml` lines to turn it off (or on).
 
 The general rules are named after their [CodeNarc](https://codenarc.org/) equivalents, so existing configurations map across. The Jenkins, Gradle and Spock rules catch, in milliseconds, mistakes those tools otherwise report only when a build runs.
 
@@ -199,6 +199,7 @@ These apply in classes whose superclass is `Specification` or ends in `Spec` or 
 | SpockBlockOrder | on | blocks in an order Spock refuses to compile (`then:` without `when:`, `when:` not followed by `then:`, `given:` after another block, anything but `and:`, `combined:` or `filter:` after `where:`), and labels that aren't Spock blocks |
 | SpockDataTableColumns | on | a `where:` data table row with a different number of columns than the row above |
 | SpockEmptyBlock | off | a `then:` or `expect:` block with no conditions, only a description (Spock accepts it, and Spock's own tests use empty blocks on purpose) |
+| SpockUnassertedCondition | on | a comparison (`==`, `<`, `instanceof`, `in`, and `!`, `&&`, `||` over them) in a `then:` or `expect:` block nested in `if`/`else`, a loop, a `switch` case, `try`, `synchronized` or a closure passed to `each`, `eachWithIndex`, `reverseEach`, `forEach` or `times`. Spock asserts only top-level statements, so the check never runs; write `assert`. Not reported inside `with { }`, `verifyAll { }`, `verifyEach`, `interaction { }`, argument constraints or `@Verify` / `@VerifyAll` helpers, which Spock asserts, or in a closure whose value its method returns (`every { }`, `find { }`) |
 
 ## Fixing
 

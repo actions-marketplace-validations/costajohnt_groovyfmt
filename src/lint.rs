@@ -760,6 +760,15 @@ pub const RULES: &[Rule] = &[
         good: "class MathSpec extends Specification {\n    def 'max'() {\n        expect:\n        Math.max(a, b) == c\n        where:\n        a | b | c\n        1 | 2 | 2\n    }\n}",
         fixable: false,
     },
+    Rule {
+        name: "SpockUnassertedCondition",
+        default: true,
+        description: "a comparison in a then: or expect: block nested in an if, loop, switch, try or a .each { } (eachWithIndex, reverseEach, forEach, times) closure, which Spock never asserts",
+        why: "Spock turns only the top-level expression statements of a then: or expect: block into conditions. A comparison inside `if`/`else`, a loop, a `switch` case, `try` or a closure passed to `each` is evaluated and thrown away, so the check can never fail. Write `assert` in front of it, or check a collection with `verifyEach` or `verifyAll { }` (Spock asserts conditions nested in `with { }`, `verifyAll { }`, `verifyEach` and `@Verify` helpers, so those aren't reported). Checked against Spock 2.4.",
+        bad: "class ResultSpec extends Specification {\n    def 'parses'() {\n        when:\n        def r = parse(input)\n\n        then:\n        if (valid) {\n            r.value == 42\n        }\n        r.items.each { it.size() > 0 }\n    }\n}",
+        good: "class ResultSpec extends Specification {\n    def 'parses'() {\n        when:\n        def r = parse(input)\n\n        then:\n        if (valid) {\n            assert r.value == 42\n        }\n        r.items.every { it.size() > 0 }\n    }\n}",
+        fixable: false,
+    },
 ];
 
 mod basic;
@@ -1978,7 +1987,7 @@ mod tests {
             lint(src).expect("parses").iter().map(|v| v.rule).collect();
         let jenkins = "pipeline {\n agent foo\n agent none\n def x = 1\n bogus { }\n options { parameters([]) }\n stages {\n  stage(\"${x}\") {\n   when { onBranch 'x' }\n   steps { if (x) { } }\n  }\n  stage('a') { }\n  stage('a') { steps { echo 1 } }\n }\n}\n";
         let gradle = "repositories { jcenter() }\ndependencies { compile 'a:b:+' }\ntask t << { }\nversion '1'\ndependencies {\n implementation('a:b:1')\n implementation group: 'a', name: 'b'\n}\n";
-        let spock = "class S extends Specification {\n def f() {\n  when:\n  f()\n  then: 'x'\n  where:\n  a | b\n  2 | 3 | 4\n }\n def g() {\n  then:\n  x\n }\n}\n";
+        let spock = "class S extends Specification {\n def f() {\n  when:\n  f()\n  then: 'x'\n  where:\n  a | b\n  2 | 3 | 4\n }\n def g() {\n  then:\n  x\n }\n def h() {\n  expect:\n  xs.each { it > 0 }\n }\n}\n";
         let more = "package p\nimport p.Q\nimport java.util.Date\nclass K {\n private int pf\n private void m() { }\n static { }\n { }\n boolean equals(Object o) { true }\n int hashcode() { 1 }\n String toString() { null }\n}\nclass L {\n boolean equals(String s) { true }\n}\ndef g() {\n def u = 1\n return 1\n f()\n}\ntry { f() } finally { return 1; throw new E(); assert x }\nswitch (x) { }\ndef s = [1, 1] as Set\ndef t = true ? 1 : 2\nassert true\nif (1 == 2) { f() }\nif (x != null || x.a) { f() }\nif (x % 2 == 1) { f() }\nl.removeAll(l)\nthrow RuntimeException()\nvoid h() { try { f() } catch (e) { new BadException(e) } }\nDate d = new Q()\ndef bd = new BigDecimal(1.5)\nif (a | b) { f() }\ndef nn = !!x\nsynchronized (l) { }\nfor (; c;) { f() }\nInteger.getInteger('p')\ndef r = (int) Math.random()\ndef io = !x instanceof String\ndef m1 = y % 1\nf(a,,b)\n";
         for (name, src) in [
             ("A.groovy", more),
