@@ -60,9 +60,10 @@ const PREC = {
  *
  * @param {GrammarSymbols<string>} $ Grammar reference symbols.
  * @param {RuleOrLiteral} right The right operand.
+ * @param {RuleOrLiteral} [left] The left operand.
  * @returns {ChoiceRule} One alternative per operator.
  */
-function binaryOperators($, right) {
+function binaryOperators($, right, left = $._expression) {
   /* eslint-disable no-multi-spaces --
    * Aligned columns make the precedence ladder readable.
    */
@@ -110,7 +111,7 @@ function binaryOperators($, right) {
   ];
   /* eslint-enable no-multi-spaces */
   return choice(...ops.map(([op, p]) => prec.left(p, seq(
-    field('left', $._expression),
+    field('left', left),
     field('operator', op),
     field('right', right),
   ))));
@@ -354,6 +355,9 @@ module.exports = grammar({
     // §4 — zero-width: an array dimension's annotations, `String @A []`, only when
     // they and then `[` follow on the line (see `_dimension_annotations`).
     $._dimension_annotation_start,
+    // §5.5 — the name an operator follows in a braceless if body's one command
+    // argument, `if (c) o.f a - b` then `else` (see `_bare_operator_command`).
+    $._command_operand,
     // Never referenced by a rule: valid only during error recovery, when
     // the scanner must not emit context-sensitive tokens.
     $._error_sentinel,
@@ -391,7 +395,11 @@ module.exports = grammar({
     // §5.5 — `(el x)` is a command call; `(String s) -> …` a lambda's
     // parameter list. The `->` decides.
     [$._type, $._parenthesized_command],
-    [$._type, $._argument_command],
+    // `(f(a), b)` is a command call, `(f(a))` a call: the comma decides.
+    [$._expression, $._parenthesized_command],
+    // In an enum constant's arguments, `E(A b` or `E(A b(1))`, also a constructor's
+    // parameters; `f(g h(1))` is `f(g(h(1)))`.
+    [$._type, $._argument_list_command, $._argument_command],
     // `a(x) or(y)`: a call chained onto a call, or a call then a new name.
     [$._call_chain, $._expression],
     // `[a][` may index the list, or open an empty index `[a][]`.
@@ -520,6 +528,9 @@ module.exports = grammar({
     // closure body's assignment; `->` decides.
     [$._expression, $._closure_parameter_name_default, $.closure_parameter],
     [$._value, $.closure_parameter],
+    // `{ File f = d() -> }`: a closure parameter's default call, or a declaration's
+    // lambda command, `{ File f = d () -> 1 }`; prec.dynamic picks the parameter.
+    [$._command_lambda_parameters, $._closure_default_arguments],
 
     // §5.10 — after `{` and a `_line_break`, a closure's parameters or its
     // first statement may follow; in an enum, a constant or a member.
@@ -726,6 +737,20 @@ module.exports = grammar({
       field('argument', alias($._bare_cast_argument, $.cast_expression)),
     )),
 
+    // `if (c) o.f a - b` then `else` on the next line: an operator expression as
+    // the one argument, `o.f(a - b)` (Groovy 2.4, 3 and 4), which elsewhere reads
+    // as two statements. The scanner gives its first name as `_command_operand`
+    // only when an `else` starts the next line.
+    _bare_operator_command: $ => seq(
+      field('receiver', choice($.identifier, $.field_access)),
+      field('argument', alias($._operand_binary, $.binary_expression)),
+    ),
+
+    _operand_binary: $ => binaryOperators($, $._expression, choice(
+      alias($._command_operand, $.identifier),
+      alias($._operand_binary, $.binary_expression),
+    )),
+
     _bare_cast_argument: $ => seq(
       field('value', $.identifier),
       'as',
@@ -740,10 +765,12 @@ module.exports = grammar({
     // After the first argument has made the statement a command chain,
     // a later argument is any expression or a named argument:
     // `helper.registerAllowedMethod 'sh', [Map], { m -> }`.
+    // A later argument may be spread, `commandLine 'gradlew', *args`.
     _command_later_argument: $ => seq(',', field('argument', choice(
       $._expression,
       alias($._command_named_argument, $.named_argument),
       alias($._command_quoted_named_argument, $.named_argument),
+      $.spread_arguments,
     ))),
 
     // §5.5 item 3 — named arguments in a parenthesis-free call:
@@ -783,8 +810,9 @@ module.exports = grammar({
       $.binary_expression,
       $.instanceof_expression,
       $.cast_expression,
-      // `menuIcon ext == 'pdf' ? A : B, m`
+      // `menuIcon ext == 'pdf' ? A : B, m`, `exec python ?: 'python3', 'x.py'`
       $.ternary_expression,
+      $.elvis_expression,
       // `assertEquals [:], map`: a list or map whose `[` is on the
       // receiver's line, which the comma after it tells from a subscript.
       alias($._command_list_argument, $.list_literal),
@@ -882,6 +910,7 @@ module.exports = grammar({
         $._statement,
         alias($._bare_name_command, $.command_chain),
         alias($._bare_cast_command, $.command_chain),
+        alias($._bare_operator_command, $.command_chain),
       )),
       optional(';'),
       optional(seq(
@@ -2686,6 +2715,8 @@ module.exports = grammar({
       choice(
         seq($._command_literal_start, field('argument', $._expression)),
         field('argument', alias($._command_named_argument, $.named_argument)),
+        // `shadow(implementation project(":lib"))` is `shadow(implementation(project(":lib")))`
+        field('argument', alias($._name_call, $.method_invocation)),
       ),
       repeat($._command_later_argument),
       optional(choice($.identifier, $.string_literal)),
@@ -3029,8 +3060,27 @@ module.exports = grammar({
         optional(choice('def', field('type', choice($._type, $.varargs_type)))),
         field('name', choice($.identifier, alias('as', $.identifier))),
         '=',
-        field('default', $._expression),
+        field('default', choice(
+          $._expression,
+          alias($._closure_default_call, $.method_invocation),
+        )),
       )),
+    ),
+
+    // A call as the default with `->` right after its `)`, `{ File f = d() -> }`:
+    // where a declaration may start, the scanner takes that `(` for a lambda's
+    // (`_command_lambda_open`, as in `File f = d () -> 1`), but Groovy 2.4, 3 and 4
+    // read the closure's parameter. prec.dynamic: it outweighs that reading.
+    _closure_default_call: $ => prec.dynamic(3, seq(
+      field('function', choice($.identifier, $.field_access)),
+      field('arguments', alias($._closure_default_arguments, $.argument_list)),
+    )),
+
+    // ponytail: empty parentheses only, the form seen in real files; `d(x) ->` would need
+    // the arguments to share a conflict with a lambda's parameters.
+    _closure_default_arguments: $ => seq(
+      alias($._command_lambda_open, '('),
+      ')',
     ),
 
     // §5.8 — Java-style lambda (Groovy 3+): `x -> x + 1`, `() -> 42`,
@@ -3179,6 +3229,14 @@ module.exports = grammar({
           field('receiver', $.method_invocation),
           repeat1($._parenthesized_command_link),
         ),
+        // `(Integer.parseInt(s), 16)` is `Integer.parseInt((s), 16)` (Groovy 3
+        // and 4): the parenthesized first argument that the comma tells from
+        // an argument list, as for `assertEquals (-1), x`.
+        seq(
+          field('receiver', choice($.identifier, $.field_access)),
+          field('argument', alias($._command_parenthesized_argument, $.parenthesized_expression)),
+          repeat1($._command_later_argument),
+        ),
       ),
       // also a quoted one: `("a" 1 "b")` is `a(1).b`
       optional(choice($.identifier, $.string_literal)),
@@ -3269,6 +3327,8 @@ module.exports = grammar({
       '\'',
       repeat(choice(
         /[^'\\\n\r]/,
+        // a line continuation; `\[\s\S]` alone would stop at a CRLF's `\n`
+        /\\\r\n/,
         /\\[\s\S]/,
       )),
       '\'',
@@ -3300,6 +3360,7 @@ module.exports = grammar({
 
     _gstring_text: _ => token.immediate(repeat1(choice(
       /[^"\\$\n\r]/,
+      /\\\r\n/,
       /\\[\s\S]/,
     ))),
 

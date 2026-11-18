@@ -154,6 +154,8 @@ pub fn is_groovy_file(path: &Path) -> bool {
 /// Any other file with no extension (and not ending in `~`) is taken when its first line is a
 /// groovy shebang (`is_groovy_shebang`); only its first 256 bytes are read, and files with
 /// other extensions are never opened.
+/// A `.gsh` is also a GLSL geometry shader: one that starts with a `#version` directive, after
+/// any blank lines and `//` or `/* */` comments (a license header), is left out (#230, #236).
 /// A file named on the command line is not read here, and is taken whatever it holds.
 pub fn is_walked_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -161,6 +163,9 @@ pub fn is_walked_file(path: &Path) -> bool {
         return Path::new(name).extension().is_none()
             && !name.ends_with('~')
             && has_groovy_shebang(path);
+    }
+    if name.ends_with(".gsh") {
+        return !glsl_shader(path);
     }
     let parse_gated = (jenkinsfile_suffix(name).is_some()
         || name.ends_with("-Jenkinsfile")
@@ -207,10 +212,43 @@ fn not_groovy(src: &str, tree: &Tree) -> bool {
 
 /// Whether the first line of the file at `path` is a groovy shebang, reading at most 256 bytes.
 fn has_groovy_shebang(path: &Path) -> bool {
+    head(path, 256).is_some_and(|h| is_groovy_shebang(&h))
+}
+
+/// Whether the file at `path` starts with a `#version` directive after any whitespace and
+/// `//` or `/* */` comments, reading at most 64 KiB. Groovy has no `#` there, so such a file
+/// is never a Groovy script.
+fn glsl_shader(path: &Path) -> bool {
+    let Some(h) = head(path, 64 * 1024) else {
+        return false;
+    };
+    let mut rest = &h[..];
+    loop {
+        rest = rest.trim_ascii_start();
+        if let Some(r) = rest.strip_prefix(b"//") {
+            rest = r
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(&[][..], |i| &r[i + 1..]);
+        } else if let Some(r) = rest.strip_prefix(b"/*") {
+            let Some(end) = r.windows(2).position(|w| w == b"*/") else {
+                return false;
+            };
+            rest = &r[end + 2..];
+        } else {
+            return rest.starts_with(b"#version");
+        }
+    }
+}
+
+/// The first `max` bytes of the file at `path`.
+fn head(path: &Path, max: u64) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut head = Vec::new();
-    std::fs::File::open(path).is_ok_and(|f| f.take(256).read_to_end(&mut head).is_ok())
-        && is_groovy_shebang(&head)
+    std::fs::File::open(path)
+        .and_then(|f| f.take(max).read_to_end(&mut head))
+        .ok()
+        .map(|_| head)
 }
 
 /// Whether `src` starts with a shebang line that runs groovy: `#!groovy`, `#!/usr/bin/groovy`,
@@ -769,6 +807,7 @@ mod tests {
             "object",
             "field",
             "operand",
+            "element",
         ];
         for f in fields {
             assert!(lang.field_id_for_name(f).is_some(), "missing field {f}");

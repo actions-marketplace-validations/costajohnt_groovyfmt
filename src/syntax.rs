@@ -34,9 +34,10 @@ pub fn check(src: &str) -> (Vec<SyntaxError>, usize) {
 
 /// What the grammar takes leniently and Groovy 2.4, 3 and 4 reject: a shebang after the first
 /// line, as after a license comment (only the top level holds one); a second `package`
-/// statement; `$(` in a double-quoted string; a label on a `return`'s line, which is a
-/// command call as its value, `return readJSON text: x`. The last two are found from the
-/// text, so a file without them costs no walk of the tree.
+/// statement; a `$` in a double-quoted string that starts no name or `${`, as in `$(` or
+/// `$[`; a backslash in a quoted string that starts no escape, `'a\d+'`; a label on a
+/// `return`'s line, which is a command call as its value, `return readJSON text: x`. The
+/// last three are found from the text, so a file without them costs no walk of the tree.
 // ponytail: a primitive type name as a variable's name (`{ char -> }`) is rejected by Groovy
 // too, but where the grammar misreads a valid declaration the name lands on `int` or `boolean`,
 // so checking it reported valid files.
@@ -60,24 +61,81 @@ fn rejected(src: &str, tree: &Tree) -> Vec<SyntaxError> {
             }
         }
     }
-    for (i, _) in src.match_indices("$(") {
-        let escaped = src[..i].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1;
-        let in_gstring = root
-            .descendant_for_byte_range(i, i + 1)
+    // Not after an unclosed `${` in the string's text: where the grammar takes a `${` for text
+    // (`"""{"a": "${f('$.x')}"}"""`, after a `"` in a triple-quoted string) its code is text too.
+    let in_gstring = |i: usize| {
+        root.descendant_for_byte_range(i, i + 1)
             .filter(|n| n.kind() == "string_fragment")
             .and_then(|n| n.parent())
-            .is_some_and(|s| s.kind() == "string_literal" && text(s, src).starts_with('"'));
-        if in_gstring && !escaped {
-            let (line, col) = position(src, byte_point(src, i));
-            out.push(SyntaxError {
-                line,
-                col,
-                end_line: line,
-                end_col: col + 2,
-                message:
-                    "`$(` in a double-quoted string: write `${...}`, or `\\$` for a dollar sign"
-                        .into(),
-            });
+            .is_some_and(|s| {
+                let before = &src[s.start_byte()..i];
+                s.kind() == "string_literal"
+                    && before.starts_with('"')
+                    && before.rfind("${").is_none_or(|o| before[o..].contains('}'))
+            })
+    };
+    let mut push = |i: usize, len: usize, message: String| {
+        let (line, col) = position(src, byte_point(src, i));
+        out.push(SyntaxError {
+            line,
+            col,
+            end_line: line,
+            end_col: col + len,
+            message,
+        });
+    };
+    // A `$` in a double-quoted string that starts no name or `${`: `"$(x)"`, `"$[x]"`, `"a$"`.
+    for (i, _) in src.match_indices('$') {
+        let escaped = src[..i].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1;
+        let next = src[i + 1..].chars().next();
+        if escaped
+            || next.is_some_and(|c| c == '{' || c == '_' || c.is_alphabetic())
+            || !in_gstring(i)
+        {
+            continue;
+        }
+        let message = if next == Some('(') {
+            "`$(` in a double-quoted string: write `${...}`, or `\\$` for a dollar sign".into()
+        } else {
+            "`$` in a double-quoted string must start a name or `${...}`: write `\\$` for a dollar sign"
+                .into()
+        };
+        push(i, 1 + usize::from(next == Some('(')), message);
+    }
+    // A backslash in a quoted string that starts no escape: `'a\d+'` (a slashy string,
+    // `/a\d+/`, takes it).
+    let mut after_escape = 0;
+    for (i, _) in src.match_indices('\\') {
+        if i < after_escape {
+            continue;
+        }
+        let rest = &src[i + 1..];
+        let Some(c) = rest.chars().next() else { break };
+        after_escape = i + 1 + c.len_utf8();
+        let valid = match c {
+            'b' | 't' | 'n' | 'f' | 'r' | 's' | '"' | '\'' | '\\' | '$' | '\n' | '\r' => true,
+            '0'..='7' => true,
+            'u' => {
+                let hex = rest.trim_start_matches('u');
+                hex.len() >= 4 && hex.as_bytes()[..4].iter().all(u8::is_ascii_hexdigit)
+            }
+            _ => false,
+        };
+        if valid {
+            continue;
+        }
+        let quoted = root
+            .descendant_for_byte_range(i, i + 1)
+            .is_some_and(|n| n.kind() == "string_literal" && text(n, src).starts_with('\''))
+            || in_gstring(i);
+        if quoted {
+            push(
+                i,
+                2,
+                format!(
+                    "`\\{c}` is not an escape in a quoted string: write `\\\\{c}`, or use a slashy string"
+                ),
+            );
         }
     }
     for (i, _) in src.match_indices("return") {
@@ -106,7 +164,118 @@ fn rejected(src: &str, tree: &Tree) -> Vec<SyntaxError> {
             ));
         }
     }
+    // A dotted name as a map key or named argument, `[a: 1, b.c: 2]` (#230): Groovy takes a
+    // name, a literal or a parenthesized expression there. Found from the `:`s.
+    for (i, _) in src.match_indices(':') {
+        if let Some(key) = root
+            .descendant_for_byte_range(i, i + 1)
+            .filter(|n| n.kind() == ":")
+            .and_then(|n| n.parent())
+            .filter(|e| matches!(e.kind(), "map_entry" | "named_argument"))
+            .and_then(|e| e.child_by_field_name("key"))
+            .filter(|k| k.kind() == "field_access" && k.end_byte() <= i)
+        {
+            out.push(at(
+                src,
+                key,
+                "a dotted map key must be quoted or in parentheses: `'a.b': x` or `(a.b): x`",
+            ));
+        }
+    }
+    // A method declared in a closure or block, `{ def f(n) { n } }` (#235): only a script's
+    // top level or a class body holds one. Not when the declaration reads as a command
+    // call: Groovy 3 and 4 take `foo bar() { }`, `a.B f() { }`, `List<X> f() { }` and
+    // `X[] f() { }` so. Not in a file that failed to parse, whose methods can land anywhere.
+    // ponytail: a method or constructor's own body is left out too, since the grammar puts
+    // valid methods there (an enum constant with arguments and a body read as a constructor, a
+    // nested `private static record R(...) { }` read as a method named R); method in method
+    // goes unreported until the grammar reads those.
+    if root.has_error() {
+        return out;
+    }
+    let in_block = |p: Node| match p.kind() {
+        "closure" => true,
+        "block" => p
+            .parent()
+            .is_some_and(|o| !matches!(o.kind(), "method_declaration" | "constructor_declaration")),
+        _ => false,
+    };
+    // Found from the `{`s that open a method's body, which costs less than a walk of the tree.
+    for (i, _) in src.match_indices('{') {
+        if !declaration_before(src, i) {
+            continue;
+        }
+        let Some(n) = root
+            .descendant_for_byte_range(i, i + 1)
+            .filter(|b| b.kind() == "{")
+            .and_then(|b| b.parent())
+            .filter(|b| b.kind() == "block")
+            .and_then(|b| b.parent())
+            .filter(|m| m.kind() == "method_declaration")
+        else {
+            continue;
+        };
+        if n.parent().is_some_and(in_block)
+            && n.child_by_field_name("return_type").is_none_or(|t| {
+                let name = text(t, src);
+                t.kind() == "type_identifier"
+                    && (name.starts_with(|c: char| c.is_uppercase())
+                        || matches!(
+                            name,
+                            "void"
+                                | "boolean"
+                                | "byte"
+                                | "char"
+                                | "short"
+                                | "int"
+                                | "long"
+                                | "float"
+                                | "double"
+                        ))
+            })
+        {
+            out.push(at(
+                src,
+                n,
+                "a method can't be declared in a closure or block: declare it at the top level or in a class, or assign a closure",
+            ));
+        }
+    }
     out
+}
+
+/// Whether the text before the `{` at `i` reads `word name(...)`, as a method declaration's
+/// does (`def f(n)`, `String g()`), so a call's `f(x) {` costs no lookup in the tree.
+// ponytail: parentheses in a parameter's default string, and a `throws` clause, hide a method.
+fn declaration_before(src: &str, i: usize) -> bool {
+    let b = src[..i].trim_end().as_bytes();
+    if b.last() != Some(&b')') {
+        return false;
+    }
+    // a parameter list is short: looking further back for its `(` only costs time
+    let from = b.len().saturating_sub(4096);
+    let mut depth = 0;
+    let Some(open) = b[from..].iter().rposition(|&c| {
+        depth += match c {
+            b')' => 1,
+            b'(' => -1,
+            _ => 0,
+        };
+        depth == 0
+    }) else {
+        return false;
+    };
+    let open = from + open;
+    let word = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$';
+    let before = src[..open].trim_end_matches([' ', '\t']).as_bytes();
+    let name = before.iter().rev().take_while(|c| word(c)).count();
+    let rest = &before[..before.len() - name];
+    let kept = rest.trim_ascii_end();
+    name > 0
+        && kept.len() < rest.len()
+        && kept
+            .last()
+            .is_some_and(|c| word(c) || matches!(c, b'>' | b']'))
 }
 
 fn at(src: &str, n: Node, message: &str) -> SyntaxError {
@@ -375,6 +544,40 @@ mod tests {
             checked("a = \"\\$(x)\"\nb = '$(x)'\nc = /$(x)/\nd = $/ $(x) /$\ne = \"${f('$(')}\"\n"),
             Vec::<String>::new()
         );
+        let lone = "`$` in a double-quoted string must start a name or `${...}`: write `\\$` for a dollar sign";
+        assert_eq!(
+            checked("a = \"$[x]\"\nb = \"\"\"cost: $5\"\"\"\nc = \"a$\"\n"),
+            [
+                format!("1:6: {lone}"),
+                format!("2:14: {lone}"),
+                format!("3:7: {lone}")
+            ]
+        );
+        assert_eq!(
+            checked("a = \"$x ${y} \\$5 $\u{e9}\"\nb = '$5'\nc = /a$/\nd = $/ $5 /$\n"),
+            Vec::<String>::new()
+        );
+        // code in a `${}` the grammar takes for text, after a `"` in a triple-quoted string
+        assert_eq!(
+            checked("a = \"\"\"{\"s\": \"${f('$.x', '\\d')}\"}\"\"\"\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            checked("a = 'a\\d+'\nb = '''\\e'''\nc = \"x\\.y\"\nd = \"${'\\w'}\"\n"),
+            [
+                "1:7: `\\d` is not an escape in a quoted string: write `\\\\d`, or use a slashy string",
+                "2:8: `\\e` is not an escape in a quoted string: write `\\\\e`, or use a slashy string",
+                "3:7: `\\.` is not an escape in a quoted string: write `\\\\.`, or use a slashy string",
+                "4:9: `\\w` is not an escape in a quoted string: write `\\\\w`, or use a slashy string",
+            ]
+        );
+        // escapes Groovy takes (`\s` in 3 and 4), a slashy string's backslashes, comments
+        assert_eq!(
+            checked(
+                "a = '\\b\\t\\n\\f\\r\\s\\\"\\'\\\\\\$\\0\\17\\u00e9 \\\\d'\nb = \"\\\\d \\$ \\u0041\"\nc = /a\\d/\nd = $/\\d/$\ne = 'a\\\nb' // \\d\n"
+            ),
+            Vec::<String>::new()
+        );
         let ret = "a `return` value can't be a command call: put its arguments in parentheses";
         assert_eq!(
             checked("def f(x) {\n    return readJSON text: x\n}\ndef g(x) { return foo a: x }\n"),
@@ -385,6 +588,67 @@ mod tests {
                 "def f(x) {\n    if (x) return 1 else return 2\n    return x; a: y\n    return pipeline { }\n    return y.new X()\n}\nreturnValue x\n"
             ),
             Vec::<String>::new()
+        );
+    }
+
+    /// #230: Groovy 2.4, 3 and 4 reject each.
+    #[test]
+    fn dotted_map_keys_are_reported() {
+        let key = "a dotted map key must be quoted or in parentheses: `'a.b': x` or `(a.b): x`";
+        assert_eq!(
+            checked("m = [a: 1, b.c: 2]\nf(a: 1, this.x: 2)\n"),
+            [format!("1:12: {key}"), format!("2:9: {key}")]
+        );
+        assert_eq!(
+            checked(
+                "m = [(b.c): 1, 'b.c': 2, b: 3, (f()): 4]\nx = c ? a.b : d\nswitch (x) { case A.B: break }\nf a: b.c\n"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// #235: a `\` ending a line in a quoted string continues it, with LF or CRLF.
+    #[test]
+    fn string_line_continuations_parse_with_either_line_ending() {
+        let lf =
+            "def s = 'a,\\\nb'\ndef g = \"x $s \\\ny\"\nf('(\\\n)')\nprintln \"${f('a \\\nb')}\"\n";
+        assert_eq!(checked(lf), Vec::<String>::new());
+        assert_eq!(checked(&lf.replace('\n', "\r\n")), Vec::<String>::new());
+    }
+
+    /// #235: Groovy 2.4, 3 and 4 reject a method in a closure or block; 3 and 4 read the
+    /// second set as command calls or expressions.
+    #[test]
+    fn methods_in_closures_and_blocks_are_reported() {
+        let m = "a method can't be declared in a closure or block: declare it at the top level or in a class, or assign a closure";
+        assert_eq!(
+            checked(
+                "def c = {\n    def f(n) { n }\n}\nif (x) {\n    String g() { 'a' }\n}\nx { void h() { } }\n"
+            ),
+            [
+                format!("2:5: {m}"),
+                format!("5:5: {m}"),
+                format!("7:5: {m}")
+            ]
+        );
+        assert_eq!(
+            checked(
+                "def f() { }\nclass A {\n    def g() { }\n    def r = new Runnable() { void run() { } }\n}\nenum E { A; int f() { 1 } }\ndef c = {\n    foo baz() { }\n    a.B f() { }\n    List<X> g() { }\n    X[] h() { }\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+        // where the grammar puts valid methods in a body: an enum constant with
+        // arguments read as a constructor, a nested record with modifiers read as a method
+        assert_eq!(
+            checked(
+                "enum E {\n    A() {\n        def x = 1\n        String f() { 'a' }\n    }\n}\nclass C {\n    private static record R(int a) {\n        boolean f() { true }\n    }\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+        // a file that failed to parse reports only that
+        assert_eq!(
+            checked("def c = {\n    def f(n) { n }\n}\nx = (\n"),
+            ["4:5: `(` is never closed at the top level"]
         );
     }
 
