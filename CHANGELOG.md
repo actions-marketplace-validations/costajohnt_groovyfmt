@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A directory walk leaves out a `.gsh` GLSL shader with blank lines or `//` or `/* */` comments (a license header) above its `#version` directive, as it did one starting with `#version`; such files were read as Groovy and skipped with "unexpected `#` at the top level" (Bixilon/Minosoft's `particle.gsh`). ([#236](https://github.com/costajohnt/groovyfmt/issues/236))
+- UnusedPrivateMethod no longer reports a method at the top level of a `.gradle` script whose name another `.gradle` script of the project mentions. A build script's methods are its project's, so a subproject calls them as `rootProject.generateVersionCode(1)`, `project(':').f()`, `parent.f()` or bare, also when they are `private` (AnExplorer; checked with Gradle 9.9.1). A Gradle build outside git and with no config file now counts as one project, from its `settings.gradle`, so UnusedPrivateMethod and UnusedPrivateField search its other files for every member, as they do in a git checkout. ([#237](https://github.com/costajohnt/groovyfmt/issues/237))
+- GradleRemovedApi also reports reading a project property the plugin conventions made, under a wrapper pinning Gradle 9 or later: `project.libsDirName`, `"${project.archivesBaseName}"`, or a bare `sourceCompatibility` at the top level, in `allprojects`, `subprojects`, `project` or `afterEvaluate`, or in an untyped task's block or its `doLast { }`, which Gradle 9.0 and 9.9.1 fail with "Could not get unknown property". The read-only `docsDir`, `testResultsDir`, `testReportDir`, `applicationDistribution`, `webAppDir`, `deploymentDescriptor` and `projectReportDir` count too, and `libsDir` and `distsDir`, gone since Gradle 7.0, are reported under no wrapper or one pinning 7 or later (jPOS's `listJars` task). Not in a typed task's block, an extension's block, a script method or a class, nor a name the script or a script above it makes an extra property of or a `gradle.properties` sets. ([#237](https://github.com/costajohnt/groovyfmt/issues/237))
+
 ## 0.27.0 (2026-11-18)
 
 ### Fixed
