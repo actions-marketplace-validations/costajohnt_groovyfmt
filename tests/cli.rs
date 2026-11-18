@@ -649,6 +649,28 @@ fn skipped_files_show_where_parsing_failed() {
     );
 }
 
+/// #241: a line ending in `A.<T>` is reported and its file left as it is.
+#[test]
+fn type_arguments_ending_a_line_are_reported_and_not_formatted() {
+    let d = Dir::new("splittype");
+    let src =
+        "androidx {\n    type = LibraryType.<LIBRARY_TYPE>\n    inceptionYear = \"<YEAR>\"\n}\n";
+    d.write("build.gradle", src);
+    let o = run(&d.0, &["--syntax", "build.gradle"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        stdout(&o),
+        "build.gradle:2:24: could not parse: a `.<Type>` must have its name on the same line, `A.<T>name`: the line ends after the type arguments\n"
+    );
+    let o = run(&d.0, &["-v", "build.gradle"], None);
+    assert!(
+        stderr(&o).contains("skipped build.gradle: parse error\n"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(d.read("build.gradle"), src);
+}
+
 #[cfg(unix)]
 #[test]
 fn syntax_messages_escape_names_and_quoted_source() {
@@ -2542,7 +2564,7 @@ fn a_walk_takes_extensionless_groovy_scripts_by_shebang() {
     assert!(stderr(&o).contains("not a Groovy file"), "{}", stderr(&o));
 }
 
-/// #230, #236: `.gsh` is also a GLSL geometry shader extension.
+/// #230, #236, #242: `.gsh` is also a GLSL geometry shader extension.
 #[test]
 fn a_walk_skips_gsh_shaders() {
     let d = Dir::new("gshshader");
@@ -2559,12 +2581,33 @@ fn a_walk_skips_gsh_shaders() {
         "licensed.gsh",
         &format!("{license}\n// geometry\n#version 330 core\nvoid main() {{ }}\n"),
     );
-    // Groovy after comments, with `#version` only inside one
-    d.write("commented.gsh", &format!("/* #version */\n// x\n{UGLY}"));
+    // #242: other preprocessor directives first (a Veil shader's `#include veil:camera`)
+    for (f, first) in [
+        ("include.gsh", "#include veil:camera"),
+        ("define.gsh", "// x\n#define N 3"),
+        ("ifdef.gsh", "#ifdef GL_ES"),
+        ("ifndef.gsh", "#ifndef X"),
+        (
+            "extension.gsh",
+            "#extension GL_EXT_geometry_shader4 : enable",
+        ),
+    ] {
+        d.write(
+            f,
+            &format!("{first}\nlayout (triangles) in;\nvoid main() {{ }}\n"),
+        );
+    }
+    // Groovy after comments, with `#version` or `#include` only inside one
+    d.write(
+        "commented.gsh",
+        &format!("/* #version */\n// #include x\n{UGLY}"),
+    );
+    // a Groovy shell script's shebang is no directive
+    d.write("shebang.gsh", &format!("#!/usr/bin/env groovy\n{UGLY}"));
     let o = run(&d.0, &["--check", "."], None);
     assert_eq!(
         stdout(&o),
-        "a.gsh\ncommented.gsh\nversion.gsh\n",
+        "a.gsh\ncommented.gsh\nshebang.gsh\nversion.gsh\n",
         "{}",
         stderr(&o)
     );
