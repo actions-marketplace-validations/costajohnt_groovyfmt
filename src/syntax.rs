@@ -182,7 +182,100 @@ fn rejected(src: &str, tree: &Tree) -> Vec<SyntaxError> {
             ));
         }
     }
+    // A method declared in a closure or block, `{ def f(n) { n } }` (#235): only a script's
+    // top level or a class body holds one. Not when the declaration reads as a command
+    // call: Groovy 3 and 4 take `foo bar() { }`, `a.B f() { }`, `List<X> f() { }` and
+    // `X[] f() { }` so. Not in a file that failed to parse, whose methods can land anywhere.
+    // ponytail: a method or constructor's own body is left out too, since the grammar puts
+    // valid methods there (an enum constant with arguments and a body read as a constructor, a
+    // nested `private static record R(...) { }` read as a method named R); method in method
+    // goes unreported until the grammar reads those.
+    if root.has_error() {
+        return out;
+    }
+    let in_block = |p: Node| match p.kind() {
+        "closure" => true,
+        "block" => p
+            .parent()
+            .is_some_and(|o| !matches!(o.kind(), "method_declaration" | "constructor_declaration")),
+        _ => false,
+    };
+    // Found from the `{`s that open a method's body, which costs less than a walk of the tree.
+    for (i, _) in src.match_indices('{') {
+        if !declaration_before(src, i) {
+            continue;
+        }
+        let Some(n) = root
+            .descendant_for_byte_range(i, i + 1)
+            .filter(|b| b.kind() == "{")
+            .and_then(|b| b.parent())
+            .filter(|b| b.kind() == "block")
+            .and_then(|b| b.parent())
+            .filter(|m| m.kind() == "method_declaration")
+        else {
+            continue;
+        };
+        if n.parent().is_some_and(in_block)
+            && n.child_by_field_name("return_type").is_none_or(|t| {
+                let name = text(t, src);
+                t.kind() == "type_identifier"
+                    && (name.starts_with(|c: char| c.is_uppercase())
+                        || matches!(
+                            name,
+                            "void"
+                                | "boolean"
+                                | "byte"
+                                | "char"
+                                | "short"
+                                | "int"
+                                | "long"
+                                | "float"
+                                | "double"
+                        ))
+            })
+        {
+            out.push(at(
+                src,
+                n,
+                "a method can't be declared in a closure or block: declare it at the top level or in a class, or assign a closure",
+            ));
+        }
+    }
     out
+}
+
+/// Whether the text before the `{` at `i` reads `word name(...)`, as a method declaration's
+/// does (`def f(n)`, `String g()`), so a call's `f(x) {` costs no lookup in the tree.
+// ponytail: parentheses in a parameter's default string, and a `throws` clause, hide a method.
+fn declaration_before(src: &str, i: usize) -> bool {
+    let b = src[..i].trim_end().as_bytes();
+    if b.last() != Some(&b')') {
+        return false;
+    }
+    // a parameter list is short: looking further back for its `(` only costs time
+    let from = b.len().saturating_sub(4096);
+    let mut depth = 0;
+    let Some(open) = b[from..].iter().rposition(|&c| {
+        depth += match c {
+            b')' => 1,
+            b'(' => -1,
+            _ => 0,
+        };
+        depth == 0
+    }) else {
+        return false;
+    };
+    let open = from + open;
+    let word = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$';
+    let before = src[..open].trim_end_matches([' ', '\t']).as_bytes();
+    let name = before.iter().rev().take_while(|c| word(c)).count();
+    let rest = &before[..before.len() - name];
+    let kept = rest.trim_ascii_end();
+    name > 0
+        && kept.len() < rest.len()
+        && kept
+            .last()
+            .is_some_and(|c| word(c) || matches!(c, b'>' | b']'))
 }
 
 fn at(src: &str, n: Node, message: &str) -> SyntaxError {
@@ -511,6 +604,51 @@ mod tests {
                 "m = [(b.c): 1, 'b.c': 2, b: 3, (f()): 4]\nx = c ? a.b : d\nswitch (x) { case A.B: break }\nf a: b.c\n"
             ),
             Vec::<String>::new()
+        );
+    }
+
+    /// #235: a `\` ending a line in a quoted string continues it, with LF or CRLF.
+    #[test]
+    fn string_line_continuations_parse_with_either_line_ending() {
+        let lf =
+            "def s = 'a,\\\nb'\ndef g = \"x $s \\\ny\"\nf('(\\\n)')\nprintln \"${f('a \\\nb')}\"\n";
+        assert_eq!(checked(lf), Vec::<String>::new());
+        assert_eq!(checked(&lf.replace('\n', "\r\n")), Vec::<String>::new());
+    }
+
+    /// #235: Groovy 2.4, 3 and 4 reject a method in a closure or block; 3 and 4 read the
+    /// second set as command calls or expressions.
+    #[test]
+    fn methods_in_closures_and_blocks_are_reported() {
+        let m = "a method can't be declared in a closure or block: declare it at the top level or in a class, or assign a closure";
+        assert_eq!(
+            checked(
+                "def c = {\n    def f(n) { n }\n}\nif (x) {\n    String g() { 'a' }\n}\nx { void h() { } }\n"
+            ),
+            [
+                format!("2:5: {m}"),
+                format!("5:5: {m}"),
+                format!("7:5: {m}")
+            ]
+        );
+        assert_eq!(
+            checked(
+                "def f() { }\nclass A {\n    def g() { }\n    def r = new Runnable() { void run() { } }\n}\nenum E { A; int f() { 1 } }\ndef c = {\n    foo baz() { }\n    a.B f() { }\n    List<X> g() { }\n    X[] h() { }\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+        // where the grammar puts valid methods in a body: an enum constant with
+        // arguments read as a constructor, a nested record with modifiers read as a method
+        assert_eq!(
+            checked(
+                "enum E {\n    A() {\n        def x = 1\n        String f() { 'a' }\n    }\n}\nclass C {\n    private static record R(int a) {\n        boolean f() { true }\n    }\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+        // a file that failed to parse reports only that
+        assert_eq!(
+            checked("def c = {\n    def f(n) { n }\n}\nx = (\n"),
+            ["4:5: `(` is never closed at the top level"]
         );
     }
 
