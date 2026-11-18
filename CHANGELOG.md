@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.26.0 (2026-11-18)
 
 ### Fixed
 - More constructs parse, as Groovy reads them; files with one were skipped ([#226](https://github.com/costajohnt/groovyfmt/issues/226)). A spread argument after a command call's first argument, `commandLine 'gradlew', *args` (Groovy 3 and 4; ballerina-platform's `ballerina-tests/build.gradle`, libsignal's Android `build.gradle`). An elvis as the first of several command-call arguments, `commandLine python ?: 'python3', 'x.py'` (Groovy 2.4, 3 and 4). A line break inside a declaration's type arguments, after a `,` or the `<`: `B<String,` then `Integer> b = null`; only a declaration may follow the `>`, so a comparison across lines is left alone. A typed closure parameter whose default is a call with empty parentheses, `{ File f = d() -> if (f) { 1 } }`, which Groovy 2.4, 3 and 4 read as the parameter's default and the grammar read as a declaration holding a lambda. The grammar pin moves to tree-sitter-groovy 0efd7b9.
