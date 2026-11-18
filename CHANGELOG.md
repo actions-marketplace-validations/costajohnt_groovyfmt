@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- More constructs parse, as Groovy reads them; files with one were skipped ([#230](https://github.com/costajohnt/groovyfmt/issues/230)). A command call whose argument is a call, as an argument list's first argument: `shadow(implementation project(":lib"))` is `shadow(implementation(project(":lib")))`, and in `f(g h(1), 2)` the `2` is `g`'s (Groovy 3 and 4; Anvil-Dev/AnvilLib and paynow-gg/minecraft-plugin build scripts). A braceless `if` body that is a command call on an operator expression, `if (c) o.f a - b` then `else` on the next line, `o.f(a - b)` (Groovy 2.4, 3 and 4); without the `else` the line still reads as two statements. A command call on a parenthesized first argument inside parentheses, `(Integer.parseInt(sep), 16) as char`, which Groovy 3 and 4 read as `Integer.parseInt((sep), 16)`; `(a(b))` stays a call. The grammar pin moves to tree-sitter-groovy b40170a.
+
 ## 0.26.0 (2026-11-18)
 
 ### Fixed
