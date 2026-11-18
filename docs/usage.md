@@ -14,7 +14,7 @@ groovyfmt [OPTIONS] [PATH]...
 | `groovyfmt --check` | list files that would be reformatted, exit 1 if any |
 | `groovyfmt --check --diff` | print a unified diff of what formatting would change, exit 1 if any |
 | `groovyfmt --lint` | report lint violations, exit 1 if any |
-| `groovyfmt --lint --fix` | fix what can be fixed safely (unused and duplicate imports, imports from the file's own package, unnecessary semicolons), then report the rest |
+| `groovyfmt --lint --fix` | fix what the [lint rules](lint.md#fixing) mark fixable (imports, semicolons, removed Gradle syntax and more), then report the rest |
 | `groovyfmt --syntax` | only parse, and report each place groovyfmt could not parse, exit 1 if any |
 | `groovyfmt --stdin` | format stdin to stdout, for editors |
 | `groovyfmt --lsp` | serve the Language Server Protocol on stdin and stdout ([editors](editors.md)) |
@@ -37,7 +37,8 @@ groovyfmt [OPTIONS] [PATH]...
 | `--lines <start>-<end>` | change only these lines ([below](#formatting-some-lines)) |
 | `--changed-since <rev>` | only files that differ from a git revision ([below](#only-changed-files)) |
 | `--baseline <file>`, `--write-baseline[=file]` | lint against a baseline ([lint](lint.md#baseline)) |
-| `-v` | also list skipped files, where each failed to parse, and timing |
+| `-v`, `--verbose` | also list skipped files, where each failed to parse, and timing |
+| `-V`, `--version` | print the version |
 | `--` | treat every later argument as a path |
 
 ## Exit status
@@ -52,7 +53,7 @@ groovyfmt [OPTIONS] [PATH]...
 
 With no paths, groovyfmt works on the current directory.
 
-Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, and pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` (`Jenkinsfile_k8s`), `*-Jenkinsfile`, `*_Jenkinsfile` (`jenkins/rstan-Jenkinsfile`), `*.jenkinsfile` or `*.jenkins` (those two in any case, so `ci/release.Jenkinsfile` too), the names the [editor plugins](editors.md) treat as Groovy. A `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile` or `*.jenkins` not ending in `.groovy` is read first: one that doesn't parse is still taken, so `--syntax`, `--check` and `--strict` report a broken pipeline as they do a `Jenkinsfile`, unless it reads as something other than Groovy. That is a hidden file (a `.jenkins` marker), a first line that is a `#!` for another program (`#!/bin/bash`), or a syntax error on a line starting with `#` (a `Dockerfile.jenkins`, a shell or YAML comment) or a template tag (`{%`, `{#`, `<%`, `{{#`, `{{/`); such a file is left out without a word. One whose suffix says it is something else (`Jenkinsfile.md`, `Jenkinsfile_k8s.md`, `.txt`, `.bak`, `.yml`, `.json`, `.j2`, `.tpl`, `.patch`, `.ini` and a few more) or ending in `~` isn't even read. A `.gsh` that starts with a `#version` directive, after any blank lines and `//` or `/* */` comments (a license header), is a GLSL shader and is left out. A file with no extension (`bin/release`, but not one ending in `~`) is taken when its first line is a `#!` that runs groovy: `#!groovy`, `#!/usr/bin/groovy` or `#!/usr/bin/env groovy`, with or without arguments. Only its first 256 bytes are read for that; a file with any other extension is never opened. The search skips:
+Directories are searched for `*.groovy`, `*.gradle`, `*.gvy`, `*.gy`, `*.gsh`, and pipelines named `Jenkinsfile`, `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*` (`Jenkinsfile_k8s`), `*-Jenkinsfile`, `*_Jenkinsfile` (`jenkins/rstan-Jenkinsfile`), `*.jenkinsfile` or `*.jenkins` (those two in any case, so `ci/release.Jenkinsfile` too), the names the [editor plugins](editors.md) treat as Groovy. A `Jenkinsfile.*`, `Jenkinsfile_*`, `Jenkinsfile-*`, `*-Jenkinsfile`, `*_Jenkinsfile` or `*.jenkins` not ending in `.groovy` is read first: one that doesn't parse is still taken, so `--syntax`, `--check` and `--strict` report a broken pipeline as they do a `Jenkinsfile`, unless it reads as something other than Groovy. That is a hidden file (a `.jenkins` marker), a first line that is a `#!` for another program (`#!/bin/bash`), or a syntax error on a line starting with `#` (a `Dockerfile.jenkins`, a shell or YAML comment) or a template tag (`{%`, `{#`, `<%`, `{{#`, `{{/`); such a file is left out without a word. One whose suffix says it is something else (`Jenkinsfile.md`, `Jenkinsfile_k8s.md`, `.txt`, `.bak`, `.yml`, `.json`, `.j2`, `.tpl`, `.patch`, `.ini` and a few more) or ending in `~` isn't even read. A `.gsh` that starts with a `#version`, `#include`, `#define`, `#ifdef`, `#ifndef` or `#extension` directive, after any blank lines and `//` or `/* */` comments (a license header), is a GLSL shader and is left out. A file with no extension (`bin/release`, but not one ending in `~`) is taken when its first line is a `#!` that runs groovy: `#!groovy`, `#!/usr/bin/groovy` or `#!/usr/bin/env groovy`, with or without arguments. Only its first 256 bytes are read for that; a file with any other extension is never opened. The search skips:
 
 - hidden directories, except the ones projects keep CI pipelines and scripts in: `.ci`, `.jenkins`, `.github`, `.gitlab`, `.circleci`, `.buildkite`, `.pipelines` and `.azure-pipelines` (so `.git`, `.gradle`, `.idea` and the like stay skipped)
 - `out`, `target` and `node_modules`
@@ -86,7 +87,7 @@ These files are skipped and listed under `-v` or `--strict`:
 
 ## Parse errors
 
-A file groovyfmt can't parse is never formatted or linted. `--syntax` lists where parsing failed, one line per place, up to 10 per file and then a count of the rest. It also lists a shebang (`#!`) after the first line, which parses and is still formatted but which Groovy 2.4, 3 and 4 reject. So is a dotted map key or named argument, `[a: 1, b.c: 2]` or `f(b.c: 2)`, which Groovy wants quoted (`'b.c'`) or in parentheses (`(b.c)`). So is a method declared in a closure or block, `{ def f(n) { n } }`; Groovy takes one only at a script's top level or in a class. `-v` and `--strict` show the same lines under each skipped file, and `--stdin` prints them after its error.
+A file groovyfmt can't parse is never formatted or linted. `--syntax` lists where parsing failed, one line per place, up to 10 per file and then a count of the rest. It also lists a shebang (`#!`) after the first line, which parses and is still formatted but which Groovy 2.4, 3 and 4 reject. So is a dotted map key or named argument, `[a: 1, b.c: 2]` or `f(b.c: 2)`, which Groovy wants quoted (`'b.c'`) or in parentheses (`(b.c)`). So is a method declared in a closure or block, `{ def f(n) { n } }`; Groovy takes one only at a script's top level or in a class. So is a line ending in type arguments after a dot, `type = LibraryType.<LIBRARY_TYPE>` (as in a template), which the grammar joins to the next line and Groovy rejects (`A.<T>name` on one line is fine); a file with one is not formatted. `-v` and `--strict` show the same lines under each skipped file, and `--stdin` prints them after its error.
 
 ```console
 $ groovyfmt --syntax
