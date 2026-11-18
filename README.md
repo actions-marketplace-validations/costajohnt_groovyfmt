@@ -65,7 +65,7 @@ exclude = ["generated/**"]
 
 ## Linting
 
-81 rules, 57 on by default (`groovyfmt --rules`). General rules follow [CodeNarc](https://codenarc.org/) names; Jenkinsfile, Gradle and Spock rules catch mistakes that otherwise surface only when a build runs. Coming from CodeNarc or npm-groovy-lint? `groovyfmt --import-codenarc <config>` converts your config. Suppress with `// groovyfmt-ignore` or `@SuppressWarnings`; adopt gradually with `--write-baseline`.
+82 rules, 58 on by default (`groovyfmt --rules`). General rules follow [CodeNarc](https://codenarc.org/) names; Jenkinsfile, Gradle and Spock rules catch mistakes that otherwise surface only when a build runs. Coming from CodeNarc or npm-groovy-lint? `groovyfmt --import-codenarc <config>` converts your config. Suppress with `// groovyfmt-ignore` or `@SuppressWarnings`; adopt gradually with `--write-baseline`.
 
 [Lint](https://github.com/costajohnt/groovyfmt/blob/main/docs/lint.md) has every rule. [Output formats](https://github.com/costajohnt/groovyfmt/blob/main/docs/output-formats.md) covers JSON, SARIF and GitHub annotations.
 
@@ -73,7 +73,7 @@ exclude = ["generated/**"]
 
 ```yaml
 - uses: actions/checkout@v5
-- uses: costajohnt/groovyfmt@v0.21.2      # runs groovyfmt --check --output-format github
+- uses: costajohnt/groovyfmt@v0.25.0      # runs groovyfmt --check --output-format github
 - run: groovyfmt --lint --output-format github
 ```
 
@@ -82,7 +82,7 @@ pre-commit:
 ```yaml
 repos:
   - repo: https://github.com/costajohnt/groovyfmt
-    rev: v0.21.2
+    rev: v0.25.0
     hooks:
       - id: groovyfmt        # or groovyfmt-check
       - id: groovyfmt-lint

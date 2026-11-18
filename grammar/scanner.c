@@ -45,6 +45,7 @@ enum TokenType {
     NEW_CLOSURE_START,
     SEALED_KEYWORD,
     COMMAND_KEYWORD_ARGUMENT,
+    DIMENSION_ANNOTATION_START,
     ERROR_SENTINEL,
 };
 
@@ -147,6 +148,12 @@ static bool finish_command_named_key(TSLexer *lexer, const bool *valid_symbols,
     if (n == '/') {
         lexer->advance(lexer, false);
         ends = lexer->lookahead == '/' || lexer->lookahead == '*';
+    }
+    // `if (a) warn line else info line`: `else` ends a braceless if body
+    // on its line, since it is reserved and continues no expression.
+    if (n == 'e') {
+        char next[5];
+        ends = read_word(lexer, next, sizeof(next)) == 4 && memcmp(next, "else", 4) == 0;
     }
     if (!ends) {
         return false;
@@ -316,6 +323,60 @@ static bool skip_parens(TSLexer *lexer) {
         }
     }
     return false;
+}
+
+// Advances past the rest of a `(…)` that holds only what a lambda's parameter
+// list can: names, whitespace, `,`, `.`, `<>`, `[]`, `?` and `@`. False at any
+// other character.
+static bool skip_parameter_parens(TSLexer *lexer) {
+    while (!lexer->eof(lexer)) {
+        int32_t c = lexer->lookahead;
+        if (c == ')') {
+            advance(lexer);
+            return true;
+        }
+        if (!(is_ident_part(c) || is_whitespace(c) || c == ',' || c == '.' || c == '<'
+              || c == '>' || c == '[' || c == ']' || c == '?' || c == '@')) {
+            return false;
+        }
+        advance(lexer);
+    }
+    return false;
+}
+
+// Whether `else` comes next, past whitespace, line breaks and comments.
+static bool else_follows(TSLexer *lexer) {
+    for (;;) {
+        while (is_whitespace(lexer->lookahead)) {
+            advance(lexer);
+        }
+        if (lexer->lookahead != '/') {
+            break;
+        }
+        advance(lexer);
+        if (lexer->lookahead == '/') {
+            while (!lexer->eof(lexer) && lexer->lookahead != '\n') {
+                advance(lexer);
+            }
+        } else if (lexer->lookahead == '*') {
+            advance(lexer);
+            for (;;) {
+                if (lexer->eof(lexer)) {
+                    return false;
+                }
+                int32_t c = lexer->lookahead;
+                advance(lexer);
+                if (c == '*' && lexer->lookahead == '/') {
+                    advance(lexer);
+                    break;
+                }
+            }
+        } else {
+            return false;
+        }
+    }
+    char word[5];
+    return read_word(lexer, word, sizeof(word)) == 4 && memcmp(word, "else", 4) == 0;
 }
 
 static bool skip_whitespace(TSLexer *lexer) {
@@ -741,6 +802,43 @@ bool tree_sitter_groovy_external_scanner_scan(
         }
     }
 
+    // SPECIFICATION.md §4 — zero-width, before an array dimension's annotations:
+    // `String @A []`, `new int @A [1] @B []`. Only when the annotations, each a
+    // name with optional `(…)`, and then `[` follow on the line; `new int[0]`
+    // then `@Override` on the next line is a member's annotation.
+    if (valid_symbols[DIMENSION_ANNOTATION_START] && !valid_symbols[ERROR_SENTINEL]) {
+        while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+            lexer->advance(lexer, true);
+            spaced = true;
+        }
+        if (lexer->lookahead == '@') {
+            lexer->mark_end(lexer);
+            while (lexer->lookahead == '@') {
+                advance(lexer);
+                while (is_ident_part(lexer->lookahead) || lexer->lookahead == '.') {
+                    advance(lexer);
+                }
+                while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                    advance(lexer);
+                }
+                if (lexer->lookahead == '(') {
+                    advance(lexer);
+                    if (!skip_parens(lexer)) {
+                        return false;
+                    }
+                    while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                        advance(lexer);
+                    }
+                }
+            }
+            if (lexer->lookahead != '[') {
+                return false;
+            }
+            lexer->result_symbol = DIMENSION_ANNOTATION_START;
+            return true;
+        }
+    }
+
     // SPECIFICATION.md §5.10 — a `[` on the current line continues the
     // expression (subscript or array type). Only spaces and tabs are
     // skipped; at a newline we fall through, and the in-grammar `[` starts
@@ -769,10 +867,13 @@ bool tree_sitter_groovy_external_scanner_scan(
         if (lexer->lookahead == '(') {
             lexer->advance(lexer, false);
             lexer->result_symbol = CALL_OPEN;
-            // `foo (a) -> a` passes a lambda (Groovy 3+); `foo (a)` is a call.
-            if (spaced && valid_symbols[COMMAND_LAMBDA_OPEN]) {
+            // `foo (a) -> a` and `foo.bar(String s) -> s` pass a lambda (Groovy 3+);
+            // `foo (a)` is a call. Without the space only a `(…)` that could be a
+            // parameter list is looked through, so a call's arguments cost no scan
+            // past their first other character.
+            if (valid_symbols[COMMAND_LAMBDA_OPEN]) {
                 lexer->mark_end(lexer);
-                if (skip_parens(lexer)) {
+                if (spaced ? skip_parens(lexer) : skip_parameter_parens(lexer)) {
                     while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
                         advance(lexer);
                     }
@@ -888,6 +989,17 @@ bool tree_sitter_groovy_external_scanner_scan(
                 lexer->result_symbol = COMMAND_LITERAL_START;
                 return true;
             }
+            // `if (b) p.accept f(t())` then `else`: a call as a braceless if
+            // body's one argument, which elsewhere reads as two statements or
+            // a method declaration; only an `else` after it decides.
+            if (lexer->lookahead == '(' && is_name_argument(word, len)) {
+                advance(lexer);
+                if (skip_parens(lexer) && else_follows(lexer)) {
+                    lexer->result_symbol = COMMAND_LITERAL_START;
+                    return true;
+                }
+                return false;
+            }
             // `println as[0]`: a variable named `as` (Groovy 3 and 4), since
             // no type starts with `[`.
             if (len == 2 && memcmp(word, "as", 2) == 0 && lexer->lookahead == '[') {
@@ -918,7 +1030,16 @@ bool tree_sitter_groovy_external_scanner_scan(
                 while (is_whitespace(lexer->lookahead)) {
                     advance(lexer);
                 }
-                if (lexer->lookahead == '?' || lexer->lookahead == '*') {
+                // `x.url isSnapshot` then `? "a"` then `: "b"`, or then `?: 2`:
+                // a line can't start with `?`, so a ternary or elvis there
+                // continues the argument, as Groovy reads it.
+                if (lexer->lookahead == '?') {
+                    advance(lexer);
+                    if (lexer->lookahead != '.') {
+                        lexer->result_symbol = COMMAND_LITERAL_START;
+                        return true;
+                    }
+                } else if (lexer->lookahead == '*') {
                     advance(lexer);
                 }
                 if (lexer->lookahead == '.') {
@@ -997,8 +1118,23 @@ bool tree_sitter_groovy_external_scanner_scan(
     // expression (`as`, `in`, `instanceof`) or the statement (`else`) is not
     // an argument.
     if (valid_symbols[COMMAND_VALUE_START] && !valid_symbols[ERROR_SENTINEL]) {
-        while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
-            lexer->advance(lexer, true);
+        // A backslash at the end of the line continues it: `def r = sh \`
+        // then `script: 'x'`.
+        for (;;) {
+            if (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                lexer->advance(lexer, true);
+            } else if (lexer->lookahead == '\\') {
+                lexer->advance(lexer, true);
+                if (lexer->lookahead == '\r') {
+                    lexer->advance(lexer, true);
+                }
+                if (lexer->lookahead != '\n') {
+                    return false;
+                }
+                lexer->advance(lexer, true);
+            } else {
+                break;
+            }
         }
         int32_t c = lexer->lookahead;
         if (c == '\'' || c == '"' || (c >= '0' && c <= '9')) {
@@ -1177,8 +1313,9 @@ bool tree_sitter_groovy_external_scanner_scan(
                 }
             } else if (sym == SEALED_KEYWORD) {
                 // Before a type's keyword, also on a later line, or before a
-                // modifier, an annotation or `non-sealed`, which Groovy rejects
-                // after it (`sealed final interface I`): those stay errors.
+                // modifier or an annotation, which Groovy 4 takes after it
+                // (`sealed abstract class W`, `sealed @Deprecated class W`).
+                // Before `final` or `non-sealed` it stays an error.
                 while (is_whitespace(lexer->lookahead)) {
                     advance(lexer);
                 }
@@ -1491,7 +1628,13 @@ bool tree_sitter_groovy_external_scanner_scan(
     //       closing `/` on the same line. Without this, `a / b\nc`
     //       at end of file would emit a slashy opener and leave
     //       the body unterminated.
-    if (lexer->lookahead == '/' || (is_whitespace(lexer->lookahead) && !lenient)) {
+    //       At the start of a line where a statement may start, Groovy
+    //       reads a `/` and a closing `/` on that line as a slashy
+    //       string whatever follows the `/`: `a | b` then `/ x / | c`
+    //       (a Spock where: row). Without the closing `/` it is division:
+    //       `x = 4` then `/ 2`.
+    bool line_start = newline && valid_symbols[LINE_BREAK] && !valid_symbols[ERROR_SENTINEL];
+    if (lexer->lookahead == '/' || (is_whitespace(lexer->lookahead) && !lenient && !line_start)) {
         return false;
     }
     // Look ahead (without consuming) to confirm a closing `/` exists
@@ -1503,9 +1646,13 @@ bool tree_sitter_groovy_external_scanner_scan(
     bool found_close = false;
     while (!lexer->eof(lexer)) {
         // `\/` is an escaped slash; any other backslash is one character.
+        // A backslash at the end of a line continues it: `/abc \` then ` x/`.
         if (lexer->lookahead == '\\') {
             advance(lexer);
-            if (lexer->lookahead == '/') {
+            if (lexer->lookahead == '\r') {
+                advance(lexer);
+            }
+            if (lexer->lookahead == '/' || lexer->lookahead == '\n') {
                 advance(lexer);
             }
             continue;

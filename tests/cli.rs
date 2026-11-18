@@ -140,6 +140,60 @@ fn skips_build_and_hidden_dirs_but_not_explicit_files() {
     assert_eq!(explicit.status.code(), Some(1));
 }
 
+/// #202: pipelines in hidden CI directories are walked; VCS, tool and cache dirs are not.
+#[test]
+fn walks_hidden_ci_dirs_but_not_tool_dirs() {
+    let d = Dir::new("cidirs");
+    for f in [
+        ".jenkins/ci.jenkins",
+        ".ci/jenkins/Pipeline.groovy",
+        ".github/scripts/release.groovy",
+        ".git/hooks/H.groovy",
+        ".gradle/8.5/init.gradle",
+        ".idea/X.groovy",
+        ".m2/repository/Y.groovy",
+    ] {
+        d.write(f, UGLY);
+    }
+    let o = run(&d.0, &["--check", "-v"], None);
+    assert_eq!(
+        stdout(&o),
+        ".ci/jenkins/Pipeline.groovy\n.github/scripts/release.groovy\n.jenkins/ci.jenkins\n"
+    );
+    for skipped in [".git", ".gradle", ".idea", ".m2"] {
+        assert!(
+            stderr(&o).contains(&format!("skipped dir {skipped}: hidden\n")),
+            "{}",
+            stderr(&o)
+        );
+    }
+}
+
+/// #202: --strict fails when nothing was checked, so a CI job can't pass on no files.
+#[test]
+fn strict_fails_when_no_groovy_file_is_found() {
+    let d = Dir::new("strict-none");
+    d.write(".idea/X.groovy", UGLY);
+    d.write("notes.txt", "x");
+    for mode in [&["--check"][..], &["--lint"], &["--syntax"], &[]] {
+        let plain = run(&d.0, mode, None);
+        assert_eq!(plain.status.code(), Some(0), "{mode:?}");
+        let args: Vec<&str> = mode.iter().copied().chain(["--strict"]).collect();
+        let strict = run(&d.0, &args, None);
+        assert_eq!(strict.status.code(), Some(1), "{mode:?}");
+        assert!(
+            stderr(&strict).contains("no Groovy files found"),
+            "{mode:?}: {}",
+            stderr(&strict)
+        );
+    }
+    d.write("A.groovy", PRETTY);
+    assert_eq!(
+        run(&d.0, &["--check", "--strict"], None).status.code(),
+        Some(0)
+    );
+}
+
 #[test]
 fn named_files_that_are_not_groovy_are_skipped() {
     let d = Dir::new("named");
@@ -312,6 +366,192 @@ fn groovy24_empty_elements_are_kept_as_written_and_linted() {
     let e = run(&d.0, &["--explain", "Groovy24EmptyElement"], None);
     assert_eq!(e.status.code(), Some(0), "{}", stderr(&e));
     assert!(stdout(&e).contains("Groovy 2.4"), "{}", stdout(&e));
+}
+
+/// #207: a predicate call nested in a then: block is reported like a comparison; calls run
+/// for what they do, assertion chains and checks Spock asserts are not.
+#[test]
+fn spock_unasserted_predicate_calls() {
+    let d = Dir::new("spock-predicate");
+    d.write(
+        "ResultSpec.groovy",
+        "class ResultSpec extends Specification {
+    def 'parses'() {
+        when:
+        def r = parse(input)
+
+        then:
+        if (valid) {
+            r.items.contains(42)
+        }
+        r.items.each {
+            !it.isEmpty()
+            seen.add(it)
+            cache.put(it, 1)
+            assertThat(it).startsWith('a')
+        }
+        with(r) {
+            if (valid) {
+                items.contains(42)
+            }
+        }
+        verifyAll {
+            if (valid) {
+                r.items.contains(42)
+            }
+        }
+    }
+}
+",
+    );
+    let l = run(&d.0, &["--lint"], None);
+    let text = stdout(&l);
+    let found: Vec<&str> = text
+        .lines()
+        .filter(|s| s.contains("SpockUnassertedCondition"))
+        .map(|s| s.split(": ").next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        found,
+        ["ResultSpec.groovy:8:13", "ResultSpec.groovy:11:13"],
+        "{text}"
+    );
+}
+
+/// #212: a nested property read in a then: block, and `<<` on a local String.
+#[test]
+fn spock_property_read_and_string_left_shift() {
+    let d = Dir::new("issue-212");
+    d.write(
+        "SnapshotSpec.groovy",
+        "class SnapshotSpec extends Specification {
+    def 'c'() {
+        when:
+        def snapshots = f()
+
+        then:
+        snapshots.size() == 2
+        snapshots[0].initial
+        [1].each {
+            snapshots[0].terminal
+            !snapshots[1].initial
+            snapshots.last().ok
+        }
+    }
+
+    void check(names) {
+        def notFound = ''
+        for (name in names) {
+            if (!name) {
+                notFound << \"missing: $name\"
+            }
+        }
+        def found = new StringBuilder()
+        names.each { found << it }
+        if (notFound) {
+            throw new IllegalStateException(notFound)
+        }
+    }
+}
+",
+    );
+    let text = stdout(&run(&d.0, &["--lint"], None));
+    let found: Vec<String> = text
+        .lines()
+        .filter(|s| {
+            s.contains("SpockUnassertedCondition") || s.contains("StringLeftShiftDiscarded")
+        })
+        .map(|s| s.split(": ").take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "SnapshotSpec.groovy:10:13 SpockUnassertedCondition",
+            "SnapshotSpec.groovy:11:13 SpockUnassertedCondition",
+            "SnapshotSpec.groovy:20:17 StringLeftShiftDiscarded",
+        ],
+        "{text}"
+    );
+    let rules = stdout(&run(&d.0, &["--rules"], None));
+    assert!(rules.contains("StringLeftShiftDiscarded"), "{rules}");
+}
+
+/// #218, as seen with Spock 2.4: what a with { } holds is asserted, but not what a .each { }
+/// in it holds; Groovy's `it.with { }` in a .each { } drops its conditions too.
+#[test]
+fn spock_unasserted_with_and_each() {
+    let d = Dir::new("spock-with-each");
+    d.write(
+        "WithSpec.groovy",
+        "class WithSpec extends Specification {
+    def 'w'() {
+        when:
+        def x = f()
+
+        then:
+        x.with {
+            a == 1
+            if (b) {
+                a == 2
+            }
+            items.each {
+                it == 5
+            }
+        }
+        x.items.each {
+            it.with {
+                a == 2
+            }
+            it.startsWith \"y\"
+            with(it) {
+                a == 2
+            }
+        }
+    }
+}
+",
+    );
+    let text = stdout(&run(&d.0, &["--lint"], None));
+    let found: Vec<&str> = text
+        .lines()
+        .filter(|s| s.contains("SpockUnassertedCondition"))
+        .map(|s| s.split(": ").next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "WithSpec.groovy:13:17",
+            "WithSpec.groovy:18:17",
+            "WithSpec.groovy:20:13"
+        ],
+        "{text}"
+    );
+}
+
+/// #218: Gradle 9.0 removed the plugin conventions, so `sourceCompatibility = 11` at the top
+/// level fails there; reported only under a wrapper pinning 9 or later.
+#[test]
+fn gradle_removed_conventions_follow_the_wrapper() {
+    let src = "apply plugin: 'application'\nsourceCompatibility = 11\nmainClassName = 'a.B'\njava { targetCompatibility = 11 }\napplication { applicationName = 'x' }\n";
+    let wrapper = |v: &str| {
+        format!("distributionUrl=https\\://services.gradle.org/distributions/gradle-{v}-bin.zip\n")
+    };
+    let hits = |v: &str| {
+        let d = project(
+            &format!("gradle-conventions-{v}"),
+            &[
+                ("build.gradle", src),
+                ("gradle/wrapper/gradle-wrapper.properties", &wrapper(v)),
+            ],
+        );
+        let text = stdout(&run(&d.0, &["--lint"], None));
+        text.lines()
+            .filter(|l| l.contains("GradleRemovedApi"))
+            .map(|l| l.split(": ").next().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hits("9.0.0"), ["build.gradle:2:1", "build.gradle:3:1"]);
+    assert_eq!(hits("8.14.4"), Vec::<String>::new());
 }
 
 const BROKEN_AT: &str =
@@ -1135,6 +1375,15 @@ fn changed_since_limits_the_run_to_files_git_sees_as_changed() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(d.read("Edited.groovy"), format!("{PRETTY}// more\n"));
     assert_eq!(d.read("Same.groovy"), UGLY);
+    // nothing changed: a clean change set, not a --strict failure (#202)
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "y"]);
+    let o = run(
+        &d.0,
+        &["--check", "--strict", "--changed-since", "HEAD"],
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 
     for (rev, msg) in [
         (
@@ -2328,6 +2577,122 @@ fn jenkinsfile_underscore_and_dash_names_are_pipelines() {
         stdout(&o).contains("JenkinsMissingSection"),
         "{}",
         stdout(&o)
+    );
+}
+
+#[test]
+fn a_walk_reports_a_pipeline_name_with_a_syntax_error() {
+    // #222: a suffixed pipeline that doesn't parse is reported, as a `Jenkinsfile` is; one
+    // that reads as something else (a Dockerfile, a shell script, a template, a hidden
+    // marker file) is still left out without a word
+    let d = Dir::new("jbroken");
+    let broken = "pipeline {\n    environment {\n        X = 1,\n    }\n}\n";
+    let names = [
+        "Jenkinsfile.ci",
+        "Jenkinsfile_deploy",
+        "JenkinsfileBase",
+        "ci_Jenkinsfile",
+        "deploy.jenkins",
+    ];
+    for f in names {
+        d.write(f, broken);
+    }
+    d.write(
+        "docker/Dockerfile.jenkins",
+        "FROM jenkins/jenkins:lts\n# plugins\nRUN jenkins-plugin-cli --plugins git\n",
+    );
+    d.write(
+        "Jenkinsfile_run",
+        "#!/bin/bash\nif [ -f x ]; then echo y; fi\n",
+    );
+    d.write(
+        "Jenkinsfile_erb",
+        "pipeline {\n<% if prod %>\n  agent any\n<% end %>\n}\n",
+    );
+    d.write(
+        "Jenkinsfile.hbs-like",
+        "pipeline {\n{{#each stages}}\n  stage('x') { }\n{{/each}}\n}\n",
+    );
+    d.write(
+        ".jenkins",
+        "This file marks the root directory for the test harness.\n",
+    );
+    d.write("Jenkinsfile.md", broken);
+    let o = run(&d.0, &["--syntax", "."], None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let all = format!("{}{}", stdout(&o), stderr(&o));
+    for f in names {
+        assert!(
+            all.contains(&format!("{f}:3:9: could not parse")),
+            "{f}: {all}"
+        );
+    }
+    assert!(all.contains("could not parse 5 of 5 files"), "{all}");
+    // --check counts them as skipped for a parse error, which --strict fails
+    let o = run(&d.0, &["--check", "-v", "."], None);
+    let err = stderr(&o);
+    assert!(err.contains("skipped deploy.jenkins: parse error"), "{err}");
+    assert!(!err.contains("Dockerfile"), "{err}");
+    let o = run(&d.0, &["--strict", "--check", "."], None);
+    assert_ne!(o.status.code(), Some(0));
+}
+
+#[test]
+fn extensionless_jenkinsfile_names_are_pipelines() {
+    // #212: corda's JenkinsfileSnykScan, aqa-tests' JenkinsfileBase
+    let d = Dir::new("jfnosep");
+    for f in [
+        "JenkinsfileSnykScan",
+        "JenkinsfileBase",
+        "Jenkinsfile.foo",
+        "Jenkinsfile-foo",
+    ] {
+        d.write(f, UGLY);
+    }
+    // not a pipeline name, a backup, a suffix that says it's something else, or not Groovy
+    for f in [
+        "JenkinsfileBase~",
+        "JenkinsfileFoo.md",
+        "JenkinsfileFoo.bak",
+        "MyJenkinsfileFoo",
+        "jenkinsfileFoo",
+        "Jenkinsfiles",
+    ] {
+        d.write(f, UGLY);
+    }
+    let template = "pipeline {\n{% for s in stages %}\n  stage('{{ s }}') { }\n{% endfor %}\n}\n";
+    d.write("JenkinsfileTemplate", template);
+    let o = run(&d.0, &["--check", "."], None);
+    assert_eq!(
+        stdout(&o),
+        "Jenkinsfile-foo\nJenkinsfile.foo\nJenkinsfileBase\nJenkinsfileSnykScan\n"
+    );
+    // named on the command line, taken; it used to be skipped with exit 0
+    let o = run(&d.0, &["--check", "JenkinsfileBase"], None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "JenkinsfileBase\n");
+    // the Jenkins rules apply to it
+    d.write("JenkinsfileCi", "def x = 1\npipeline {\n    stages {}\n}\n");
+    let o = run(&d.0, &["--lint", "JenkinsfileCi"], None);
+    assert!(
+        stdout(&o).contains("JenkinsMissingSection"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+#[test]
+fn lint_fix_keeps_a_semicolon_groovy_3_needs() {
+    // #211: groovy-eclipse RenameMethod testStaticImport; without the `;` Groovy 3 and 4
+    // read `FOO bar()`, a method declaration without a body
+    let d = Dir::new("fix-211");
+    let src = "import static p.A.FOO;\nFOO;\nbar()\nx = 1;\n";
+    d.write("A.groovy", src);
+    let f = run(&d.0, &["--lint", "--fix"], None);
+    assert_eq!(f.status.code(), Some(0), "{}", stderr(&f));
+    assert_eq!(
+        d.read("A.groovy"),
+        "import static p.A.FOO\nFOO;\nbar()\nx = 1\n"
     );
 }
 
@@ -3788,4 +4153,49 @@ fn gradle_compile_is_fixed_only_with_its_replacement_configured() {
     );
     run(&d.0, &["--lint", "--fix", "build.gradle"], None);
     assert_eq!(d.read("build.gradle"), src);
+}
+
+#[test]
+fn specs_whose_base_is_in_another_file_are_checked() {
+    let feature = "    def \"f\"() {\n        expect:\n        if (c) {\n            x == 1\n        }\n    }\n";
+    let spec = |decl: &str| format!("{decl} {{\n{feature}}}\n");
+    let d = project(
+        "spockbase",
+        &[
+            (
+                "src/Base.groovy",
+                "abstract class Base extends Specification { }\n",
+            ),
+            ("src/Mid.groovy", "abstract class Mid<T> extends Base { }\n"),
+            (
+                "src/Deep.groovy",
+                "abstract class Deep extends com.x.Mid<String> { }\n",
+            ),
+            ("src/ASpec.groovy", &spec("class ASpec extends Base")),
+            ("src/BTest.groovy", &spec("class BTest extends Deep")),
+            // not specs: a base that extends nothing, named like a spec or not, and a base
+            // no file declares in a file that doesn't import from Spock
+            ("src/Plain.groovy", "class Plain { }\n"),
+            ("src/CSpec.groovy", &spec("class CSpec extends Plain")),
+            (
+                "src/DTest.groovy",
+                &spec("class DTest extends AbstractIntegrationTest"),
+            ),
+        ],
+    );
+    let o = run(&d.0, &["--lint"], None);
+    let out = stdout(&o);
+    let hits: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("SpockUnassertedCondition"))
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    assert_eq!(hits, ["src/ASpec.groovy", "src/BTest.groovy"], "{out}");
+    // one file named alone is resolved through its project the same way
+    let o = run(&d.0, &["--lint", "src/BTest.groovy"], None);
+    assert!(
+        stdout(&o).contains("SpockUnassertedCondition"),
+        "{}",
+        stdout(&o)
+    );
 }

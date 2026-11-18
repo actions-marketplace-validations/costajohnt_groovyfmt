@@ -351,6 +351,9 @@ module.exports = grammar({
     // §5.5 — `as` or `in` as a bare receiver's one argument, when the
     // statement ends after it: `println as` (lexed like `_command_name_argument`).
     $._command_keyword_argument,
+    // §4 — zero-width: an array dimension's annotations, `String @A []`, only when
+    // they and then `[` follow on the line (see `_dimension_annotations`).
+    $._dimension_annotation_start,
     // Never referenced by a rule: valid only during error recovery, when
     // the scanner must not emit context-sensitive tokens.
     $._error_sentinel,
@@ -420,6 +423,8 @@ module.exports = grammar({
     // (parenthesized_type_cast). Tree-sitter explores both via
     // this conflict; the `)` plus the next token disambiguates.
     [$._expression, $._type],
+    // `(@A String)` is a cast's annotated type or a lambda's parameter.
+    [$.formal_parameter, $._type],
 
     // §4 — `a.b.c` could be a field_access chain (expression
     // context) or a qualified_type (type context). Same family
@@ -1056,8 +1061,11 @@ module.exports = grammar({
     // or a multi_type for Java 7+ / Groovy multi-catch. Closes
     // murtaza64 #39. The type itself is optional — Groovy allows a
     // bare `catch (e) { … }`, implicitly typed as Exception.
+    // Annotations may come before or after `final` (Groovy 3 and 4):
+    // `catch (@A Exception e)`.
     catch_formal_parameter: $ => seq(
-      optional('final'),
+      repeat($.annotation),
+      optional(seq('final', repeat($.annotation))),
       optional(field('type', choice($._type, $.multi_type))),
       field('name', $.identifier),
     ),
@@ -1079,7 +1087,8 @@ module.exports = grammar({
     // §4 — class declaration with optional Groovy 4 sealed modifier
     // and `permits` clause. The `non-sealed` form is a single
     // anonymous token (token('non-sealed')) so the dash doesn't
-    // get lexed as subtraction.
+    // get lexed as subtraction. Modifiers and annotations may follow it
+    // (Groovy 4): `sealed abstract class W`, `sealed @Deprecated class W`.
     // `def` may lead the modifiers: `def class X`, `def static class X`.
     // Annotations may also follow modifiers: `static @Immutable class X`.
     class_declaration: $ => seq(
@@ -1087,7 +1096,10 @@ module.exports = grammar({
       optional('def'),
       optional(seq(repeat1($._modifier), repeat1($.annotation))),
       repeat($._modifier),
-      optional(choice(alias($._sealed_keyword, 'sealed'), token('non-sealed'))),
+      optional(seq(
+        choice(alias($._sealed_keyword, 'sealed'), token('non-sealed')),
+        repeat(choice($._sealed_modifier, $.annotation)),
+      )),
       'class',
       field('name', $.identifier),
       optional(field('type_parameters', $.type_parameters)),
@@ -1100,7 +1112,10 @@ module.exports = grammar({
     trait_declaration: $ => seq(
       repeat($.annotation),
       repeat($._modifier),
-      optional(choice(alias($._sealed_keyword, 'sealed'), token('non-sealed'))),
+      optional(seq(
+        choice(alias($._sealed_keyword, 'sealed'), token('non-sealed')),
+        repeat(choice($._sealed_modifier, $.annotation)),
+      )),
       alias($._trait_keyword, 'trait'),
       field('name', $.identifier),
       optional(field('type_parameters', $.type_parameters)),
@@ -1114,7 +1129,10 @@ module.exports = grammar({
     interface_declaration: $ => seq(
       ...memberModifiers($),
       optional('def'),
-      optional(choice(alias($._sealed_keyword, 'sealed'), token('non-sealed'))),
+      optional(seq(
+        choice(alias($._sealed_keyword, 'sealed'), token('non-sealed')),
+        repeat(choice($._sealed_modifier, $.annotation)),
+      )),
       'interface',
       field('name', $.identifier),
       optional(field('type_parameters', $.type_parameters)),
@@ -1191,6 +1209,21 @@ module.exports = grammar({
       'protected',
       'static',
       'final',
+      'abstract',
+      'synchronized',
+      'native',
+      'transient',
+      'volatile',
+      'strictfp',
+    ),
+
+    // Not `final`, which Groovy rejects after `sealed` or `non-sealed`
+    // (`sealed final interface I`).
+    _sealed_modifier: _ => choice(
+      'public',
+      'private',
+      'protected',
+      'static',
       'abstract',
       'synchronized',
       'native',
@@ -1450,10 +1483,12 @@ module.exports = grammar({
     ),
 
     // §4 — `throws E1, E2, …` after a method signature.
+    // A type may be annotated (Groovy 3+): `throws @A IOException`.
     throws_clause: $ => prec.left(seq(
       'throws',
+      repeat($.annotation),
       $._type,
-      repeat(seq(',', $._type)),
+      repeat(seq(',', repeat($.annotation), $._type)),
     )),
 
     formal_parameters: $ => seq(
@@ -1673,13 +1708,26 @@ module.exports = grammar({
       )),
       // Modifiers on a script variable, as on a field:
       // `public static final long IM = 139968`.
+      // `final` may lead: `final static long N = 1`.
       prec.dynamic(1, seq(
+        optional('final'),
         choice('public', 'protected', 'private', 'static'),
         repeat($._modifier),
         field('type', $._type),
         $._initialized_declarator,
         repeat(seq(',', $._initialized_declarator)),
       )),
+      // The same with no type, a dynamically typed local in Groovy 2.4, 3 and
+      // 4: `private static final X = 1`, `static final Y = 2`, `private z = 3`.
+      // The token after the first name decides: `=` here, a name for the
+      // typed form, `(` for a script method.
+      seq(
+        optional('final'),
+        choice('public', 'protected', 'private', 'static'),
+        repeat($._modifier),
+        $._initialized_declarator,
+        repeat(seq(',', $._initialized_declarator)),
+      ),
       // §5.10 — a type on the line before the name is a separate path that
       // loses to any other reading: `a.b` and then `bar = 1` on the next
       // line are two statements, though the parser split at the `.` before
@@ -2256,9 +2304,15 @@ module.exports = grammar({
     )),
 
     // `[` on the type's line lexes as `_subscript_open` (§5.10).
-    dimension_expression: $ => seq(alias($._subscript_open, '['), $._expression, ']'),
+    // A dimension may be annotated (Groovy 3+): `new String @A [1]`.
+    dimension_expression: $ => seq(
+      optional($._dimension_annotations),
+      alias($._subscript_open, '['),
+      $._expression,
+      ']',
+    ),
 
-    dimension: $ => seq(alias($._subscript_open, '['), ']'),
+    dimension: $ => seq(optional($._dimension_annotations), alias($._subscript_open, '['), ']'),
 
     // Right-recursive so each `[]` after the first stays a dimension:
     // `new int[10][][]`.
@@ -2302,9 +2356,11 @@ module.exports = grammar({
     // value that starts with a name, string or number must be on that line:
     // after `x = (e.user)` a statement on the next line is not a cast's
     // value. The plain form takes the other values (`(int) -1`, `(T) [a]`).
+    // The type may be annotated (Groovy 3+): `(@A String) e`.
     parenthesized_type_cast: $ => prec.right(PREC.UNARY, choice(
       prec.dynamic(2, seq(
         '(',
+        repeat($.annotation),
         field('type', $._type),
         ')',
         $._cast_value_start,
@@ -2312,6 +2368,7 @@ module.exports = grammar({
       )),
       seq(
         '(',
+        repeat($.annotation),
         field('type', $._type),
         ')',
         field('value', choice(
@@ -2330,6 +2387,7 @@ module.exports = grammar({
       // statements.
       prec.dynamic(-3, seq(
         '(',
+        repeat($.annotation),
         field('type', $._type),
         ')',
         $._line_break,
@@ -2366,7 +2424,17 @@ module.exports = grammar({
       repeat1(seq('.', alias($.identifier, $.type_identifier))),
     )),
 
-    array_type: $ => prec(PREC.ARRAY_TYPE, seq($._type, alias($._subscript_open, '['), ']')),
+    // A dimension may be annotated (Groovy 3+): `String @A [] s`.
+    array_type: $ => prec(PREC.ARRAY_TYPE, seq(
+      $._type,
+      optional($._dimension_annotations),
+      alias($._subscript_open, '['),
+      ']',
+    )),
+
+    // Only when `[` follows the annotations on their line: `new int[0]` then
+    // `@Override` on the next line starts a member, not another dimension.
+    _dimension_annotations: $ => seq($._dimension_annotation_start, repeat1($.annotation)),
 
     // §4 / §5.14 — Java-style generic type arguments. Allows nested
     // generics (`Map<String, List<Integer>>`) and bounded wildcards
@@ -2424,27 +2492,19 @@ module.exports = grammar({
       '>',
     ),
 
-    // An array type argument may annotate its dimension:
-    // `Consumer<@T1 String @T2 []>`.
-    _type_argument: $ => choice(
-      $._type,
-      $.wildcard,
-      seq(repeat1($.annotation), $._type),
-      alias($._annotated_array_type, $.array_type),
-    ),
-
-    _annotated_array_type: $ => seq(
+    // A type argument may be annotated, `List<@A ? extends Object>`, and so may
+    // an array dimension (see `array_type`): `Consumer<@T1 String @T2 []>`.
+    _type_argument: $ => seq(
       repeat($.annotation),
-      $._type,
-      repeat1($.annotation),
-      alias($._subscript_open, '['),
-      ']',
+      choice($._type, $.wildcard),
     ),
 
+    // The bound may be annotated: `? extends @A Object`.
     wildcard: $ => seq(
       '?',
       optional(seq(
         choice('extends', 'super'),
+        repeat($.annotation),
         $._type,
       )),
     ),
@@ -2472,6 +2532,7 @@ module.exports = grammar({
     safe_navigation_expression: $ => prec.left(PREC.ACCESS, seq(
       field('object', $._expression),
       '?.',
+      optional(field('type_arguments', $.type_arguments)),
       field('property', $._property_name),
     )),
 
@@ -2484,9 +2545,11 @@ module.exports = grammar({
       field('property', $._property_name),
     )),
 
+    // Both may pass explicit type arguments: `l*.<String>m()`, `l?.<String>m()`.
     spread_dot_expression: $ => prec.left(PREC.ACCESS, seq(
       field('object', $._expression),
       '*.',
+      optional(field('type_arguments', $.type_arguments)),
       field('property', $._property_name),
     )),
 
@@ -2525,11 +2588,11 @@ module.exports = grammar({
 
     // §5.14 — method reference. Groovy 3+. The RHS is either an
     // identifier (`String::length`) or the `new` keyword
-    // (`Foo::new`).
+    // (`Foo::new`), also `class` (Groovy 3 and 4): `foo(x, A::class)`.
     method_reference_expression: $ => prec.left(PREC.ACCESS, seq(
       field('target', $._expression),
       '::',
-      field('name', choice($.identifier, alias($.string_literal, $.quoted_identifier), 'new')),
+      field('name', choice($.identifier, alias($.string_literal, $.quoted_identifier), 'new', 'class')),
     )),
 
     // §3.2 — postfix `++` / `--`. Distinct node kind from the
@@ -2615,13 +2678,17 @@ module.exports = grammar({
     // after it too, as Groovy reads it:
     // `form(new Spec().ui new Attachment(), { … })` passes `form` one value.
     // On a bare name (Groovy 3 and 4): `println(g 1)`, `parseText(readJSON file: f)`.
+    // Also on a quoted name (Groovy 3 and 4): `f("foo" 1)` is `f(foo(1))`.
+    // A name left after the last argument is a property, a quoted one too (Groovy 3 and 4):
+    // `f(a 1 b)` is `f(a(1).b)`, `f("a" 1 "b")` is `f(a(1).b)`.
     _argument_list_command: $ => prec.right(seq(
-      field('receiver', choice($.identifier, $.field_access)),
+      field('receiver', choice($.identifier, $.field_access, $.string_literal)),
       choice(
         seq($._command_literal_start, field('argument', $._expression)),
         field('argument', alias($._command_named_argument, $.named_argument)),
       ),
       repeat($._command_later_argument),
+      optional(choice($.identifier, $.string_literal)),
     )),
 
     // After `new Type` the parenthesis may follow a newline: `new File`
@@ -2939,13 +3006,23 @@ module.exports = grammar({
     closure_parameter: $ => choice(
       prec(2, seq(
         repeat($.annotation),
-        optional('final'),
+        // `def final` too: `{ def final int x -> }`
+        optional(choice('final', seq('def', 'final'))),
         optional(choice(
           seq('def', optional(field('type', choice($._type, $.varargs_type)))),
           field('type', choice($._type, $.varargs_type)),
         )),
         // `as` is a name too (Groovy 3 and 4): `{ String as -> as }`
         field('name', choice($.identifier, alias('as', $.identifier))),
+      )),
+      // `in` too, after a type (Groovy 3 and 4): `{ InputStream in -> }`. Only
+      // after a type, where `in` is already a keyword token, so `{ in.x }`
+      // still lexes `in` as a name.
+      prec(2, seq(
+        repeat($.annotation),
+        optional(choice('final', seq('def', 'final'))),
+        field('type', choice($._type, $.varargs_type)),
+        field('name', alias('in', $.identifier)),
       )),
       prec.dynamic(-1, seq(
         optional('final'),
@@ -2988,15 +3065,34 @@ module.exports = grammar({
     // the conflict declaration above keeps both alternatives alive.
     // Elements may be spread: `[*a, *b]`. Groovy 2.4 drops an empty element,
     // `[a,,b]` (see `_argument_list_body`).
-    list_literal: $ => seq(
-      '[',
-      optional(seq(
-        choice($._expression, $.spread_arguments),
-        repeat(seq(',', repeat(','), choice($._expression, $.spread_arguments))),
-        optional(','),
-      )),
-      ']',
-    ),
+    list_literal: $ => {
+      const element = choice(
+        $._expression,
+        $.spread_arguments,
+        alias($._list_line_call, $.method_invocation),
+      );
+      return seq(
+        '[',
+        optional(seq(
+          element,
+          repeat(seq(',', repeat(','), element)),
+          optional(','),
+        )),
+        ']',
+      );
+    },
+
+    // In a list a line break ends nothing, so an argument list on the next
+    // line still calls the element, as Groovy 2.4, 3 and 4 read it:
+    // `[ buildDiscarder` then `(logRotator(…)) ]`. The `(` is the in-grammar
+    // one, valid after an element only here; on the element's line the
+    // scanner's `_call_open` takes it as usual.
+    _list_line_call: $ => prec.left(PREC.POSTFIX, seq(
+      field('function', choice($._expression, alias($._list_line_call, $.method_invocation))),
+      field('arguments', alias($._list_line_arguments, $.argument_list)),
+    )),
+
+    _list_line_arguments: $ => seq('(', optional($._argument_list_body), ')'),
 
     // §3.2 PRIMARY / §5.3 — map literal. `[:]` is the empty map;
     // anything else is one-or-more `key: value` entries. The
@@ -3056,25 +3152,41 @@ module.exports = grammar({
     // `(el searchBy).click()`, `(go LoginPage).login(u, p)`,
     // `return (run service: 'x', with: m)`. Inside `( … )` a name after the
     // receiver can't start a declaration, so it is the argument.
+    // A call needs no argument of its own (Groovy 3 and 4):
+    // `(f(a) intersect b)` is `f(a).intersect(b)`. A name left over at the
+    // end is a property: `(a intersect b)` is `a(intersect).b`.
     _parenthesized_command: $ => seq(
-      field('receiver', choice($.identifier, $.field_access)),
       choice(
-        seq($._command_literal_start, field('argument', choice(
-          $._expression,
-          alias($._command_quoted_named_argument, $.named_argument),
-        ))),
-        field('argument', alias($._command_named_argument, $.named_argument)),
-        field('argument', $.identifier),
-        // `if (valueOf findProperty(s, 'x'))`
-        field('argument', alias($._name_call, $.method_invocation)),
+        seq(
+          // also a quoted name (Groovy 3 and 4): `("foo" 1)` is `foo(1)`
+          field('receiver', choice($.identifier, $.field_access, $.string_literal)),
+          choice(
+            seq($._command_literal_start, field('argument', choice(
+              $._expression,
+              alias($._command_quoted_named_argument, $.named_argument),
+            ))),
+            field('argument', alias($._command_named_argument, $.named_argument)),
+            field('argument', $.identifier),
+            // `if (valueOf findProperty(s, 'x'))`
+            field('argument', alias($._name_call, $.method_invocation)),
+          ),
+          repeat($._command_later_argument),
+          // `(page.optionList 0 isEmpty())`: a call chained after the argument,
+          // or a command chained after it, `(1.plus 2 plus 3)` (`1.plus(2).plus(3)`).
+          repeat($._parenthesized_command_link),
+        ),
+        seq(
+          field('receiver', $.method_invocation),
+          repeat1($._parenthesized_command_link),
+        ),
       ),
-      repeat($._command_later_argument),
-      // `(page.optionList 0 isEmpty())`: a call chained after the argument,
-      // or a command chained after it, `(1.plus 2 plus 3)` (`1.plus(2).plus(3)`).
-      repeat(choice(
-        field('argument', alias($._name_call, $.method_invocation)),
-        seq($.identifier, field('argument', $._expression), repeat($._command_later_argument)),
-      )),
+      // also a quoted one: `("a" 1 "b")` is `a(1).b`
+      optional(choice($.identifier, $.string_literal)),
+    ),
+
+    _parenthesized_command_link: $ => choice(
+      field('argument', alias($._name_call, $.method_invocation)),
+      seq($.identifier, field('argument', $._expression), repeat($._command_later_argument)),
     ),
 
     // The last call may take a closure: `or (b) or (c) { }`.

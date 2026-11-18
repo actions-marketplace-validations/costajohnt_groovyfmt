@@ -23,10 +23,11 @@ PATHs are files or directories (default: the current directory). Directories are
 searched for *.groovy, *.gradle, *.gvy, *.gy, *.gsh, Jenkinsfile, *.jenkinsfile,
 Jenkinsfile.*, Jenkinsfile_*, Jenkinsfile-*, *-Jenkinsfile, *_Jenkinsfile and
 *.jenkins (those if they parse), and extensionless scripts whose first line is
-a groovy #! line, skipping hidden directories, out, target, node_modules, build
-(except a package named build under a src directory within its project), and
-anything matching the config file's `exclude` patterns (which also apply to
-files named here).
+a groovy #! line, skipping hidden directories (but not .ci, .jenkins, .github,
+.gitlab, .circleci, .buildkite, .pipelines, .azure-pipelines), out, target,
+node_modules, build (except a package named build under a src directory within
+its project), and anything matching the config file's `exclude` patterns
+(which also apply to files named here).
 Each file uses the nearest .groovyfmt.toml / groovyfmt.toml in its directory or
 above it; a nested config replaces its parent's, nothing is merged.
 
@@ -65,7 +66,8 @@ Options:
       --explain <RULE>     Explain a lint rule: why it matters, an example, whether
                            --fix fixes it and how to turn it off
       --strict             List skipped files (unparseable, not UTF-8, too large) and
-                           exit 1 if there are any, so CI can't pass on unchecked files
+                           exit 1 if there are any, or if no Groovy file was found, so
+                           CI can't pass on unchecked files
       --force              Read every file named here as Groovy, whatever its name
                            (by default one that isn't *.groovy, *.gradle, *.gvy, *.gy,
                            *.gsh, Jenkinsfile, Jenkinsfile.*, Jenkinsfile_*,
@@ -1067,7 +1069,14 @@ fn main() {
             if a.verbose && !matches!(a.mode, Mode::Errors | Mode::Tree) {
                 report(files.iter().map(|f| &*cfgs[f]));
             }
-            match a.mode {
+            // a walk that found nothing (every pipeline in a skipped directory, a typo'd
+            // path) would pass CI having checked nothing; with --changed-since an empty
+            // list is a clean change set (#202)
+            let nothing = a.strict && files.is_empty() && a.changed_since.is_none();
+            if nothing {
+                eprintln!("groovyfmt: --strict: no Groovy files found");
+            }
+            let code = match a.mode {
                 Mode::Lint => {
                     // where --write-baseline writes: its own value, else --baseline, else the
                     // working directory's config, else the default name
@@ -1105,7 +1114,8 @@ fn main() {
                 Mode::Errors => errors(&files),
                 Mode::Tree => tree(&files),
                 _ => fmt(&files, &links, &cfgs, &a),
-            }
+            };
+            if nothing { code.max(1) } else { code }
         }
     };
     std::process::exit(if WALK_FAILED.load(Ordering::Relaxed) {
@@ -1419,7 +1429,7 @@ fn lint_files(
             Err(why) => return Ok(Err((why, Diag::default()))),
         };
         let compile = cfgs[p].gradle_compile_replacement.as_deref();
-        let violations = match lint::lint_file(p, &src) {
+        let violations = match lint::lint_with(p, &src, &projects.spec_base(real)) {
             Ok(mut vs) => {
                 lint::opt_in_fixes(&mut vs, &src, compile);
                 vs
@@ -1457,7 +1467,8 @@ fn lint_files(
                     }
                     if r.written.is_ok() {
                         // the fix checked that the fixed text lints
-                        r.violations = lint::lint_file(p, &text).unwrap_or_default();
+                        r.violations = lint::lint_with(p, &text, &projects.spec_base(real))
+                            .unwrap_or_default();
                         lint::opt_in_fixes(&mut r.violations, &text, compile);
                         r.fixed = fixed;
                         new_text = Some(text);

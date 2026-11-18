@@ -10,7 +10,9 @@
 //! properties removed in 8.0), https://docs.gradle.org/current/userguide/upgrading_version_8.html
 //! (space assignment deprecated in 8.12, "Upgrading from 8.11 and earlier"),
 //! https://docs.gradle.org/current/userguide/upgrading_version_9.html (multi-string
-//! dependency notation deprecated in 9.1, "Upgrading from 9.0.0 and earlier").
+//! dependency notation deprecated in 9.1, "Upgrading from 9.0.0 and earlier"),
+//! https://docs.gradle.org/current/userguide/upgrading_major_version_9.html (plugin
+//! conventions removed in 9.0, "Removal of conventions").
 
 use super::jenkins::{Call, call, statements};
 use super::{Edit, Violation, at, constant_value, has_interpolation, own_lines};
@@ -76,6 +78,10 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     let mut plugins = HashSet::new();
     // the script's own methods: its `compile(x)` or `jcenter()` is no configuration (#192)
     let mut methods = HashSet::new();
+    // removed convention properties the script sets, and the extra properties it makes
+    let (mut conventions, mut ext) = (Vec::new(), HashSet::new());
+    // `exec { }` and `javaexec { }` on the project or script
+    let mut execs = Vec::new();
     crate::preorder(root, |n| {
         plugins.extend(applied_plugin(src, n));
         if n.kind() == "method_declaration"
@@ -84,6 +90,8 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
             methods.insert(text(m, src));
         }
         removed_api(src, n, &mut removed, &mut conf_refs);
+        execs.extend(project_exec(src, n));
+        convention(src, n, &mut conventions, &mut ext);
         if let Some(names) = property_scope(src, n)
             && !path
                 .file_name()
@@ -109,58 +117,20 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
         }
         if let Some(c) = call(n, src)
             && let Some(b) = c.body
+            && c.name == "dependencies"
         {
-            match c.name {
-                "dependencies" => deps.push(b),
-                "configurations" => {
-                    for s in statements(b) {
-                        // create('runtime'), register('runtime') { }, ...
-                        if let Some(c) = call(s, src)
-                            && DECLARING.contains(&c.name)
-                            && let Some(name) = c.args.first().and_then(|a| constant_value(*a, src))
-                        {
-                            declared.insert(name);
-                        }
-                        let t = text(s, src);
-                        let end = t
-                            .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-                            .unwrap_or(t.len());
-                        declared.insert(t[..end].to_string());
-                    }
-                    // a name the block reads makes it too, as Gradle runs it:
-                    // `integrationTestRuntime.extendsFrom testRuntime` (#145)
-                    crate::preorder(b, |x| {
-                        if x.kind() == "identifier"
-                            && x.parent()
-                                .is_none_or(|p| p.child_by_field_name("field") != Some(x))
-                        {
-                            declared.insert(text(x, src).to_string());
-                        }
-                        true
-                    });
-                }
-                _ => {}
-            }
+            deps.push(b);
         }
-        // configurations.create('compile'), maybeCreate, register, getByName, named
-        if n.kind() == "method_invocation"
-            && n.child_by_field_name("function").is_some_and(|f| {
-                let t = text(f, src);
-                DECLARING
-                    .iter()
-                    .any(|d| t.strip_suffix(d).is_some_and(|r| r.ends_with('.')))
-            })
-            && let Some(a) = n
-                .child_by_field_name("arguments")
-                .and_then(|a| a.named_child(0))
-            && let Some(name) = constant_value(a, src)
-        {
-            declared.insert(name);
-        }
+        declares(src, n, &mut declared);
         true
     });
+    let project_script = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f != "settings.gradle" && !f.ends_with("init.gradle"));
     // read only for a file that would get a report
     let old_gradle = std::cell::OnceCell::new();
+    let applier = std::cell::OnceCell::new();
     let jvm = plugins.iter().any(|p| JVM_PLUGINS.contains(&p.as_str()));
     for b in deps {
         for s in statements(b) {
@@ -175,6 +145,9 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
                 && !methods.contains(c.name)
                 && !owners(s, src).any(|o| o == "buildscript")
                 && !*old_gradle.get_or_init(|| wrapper_major(path).is_some_and(|m| m < 7))
+                && !applier
+                    .get_or_init(|| applier_declared(path))
+                    .contains(c.name)
             {
                 // the name starts the statement: `testCompile 'a'`, `testCompile('a') { }`
                 let fix =
@@ -208,8 +181,19 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
             }
         }
     }
+    if project_script {
+        for (n, name) in execs {
+            if !methods.contains(name) {
+                removed.push((
+                    n,
+                    format!("`{name} {{ }}` on the project or build script was removed in Gradle 9.0; inject ExecOperations and call its {name}, or use providers.{name} for a value"),
+                    9,
+                ));
+            }
+        }
+    }
     for (n, name) in conf_refs {
-        if !declared.contains(name) {
+        if !declared.contains(name) && !guarded(src, n, name) {
             let new = REMOVED
                 .iter()
                 .find(|(old, _)| *old == name)
@@ -224,17 +208,275 @@ pub(super) fn check(path: &Path, src: &str, root: Node, v: &mut Vec<Violation>) 
     if methods.contains("jcenter") {
         v.retain(|x| x.rule != "GradleJcenter");
     }
+    // only under a wrapper pinning 9 or later: many builds still pin 8, where these work
+    if project_script && !conventions.is_empty() && wrapper_major(path).is_some_and(|m| m >= 9) {
+        for (s, name, new) in conventions {
+            if !ext.contains(name) && !shadowed(src, s, name) && !gradle_property(path, name) {
+                v.push(at(
+                    s,
+                    "GradleRemovedApi",
+                    format!("The project property `{name}` was removed in Gradle 9.0 with the plugin conventions; use {new}"),
+                ));
+            }
+        }
+    }
     if removed.is_empty() {
         return;
     }
     let major = wrapper_major(path);
     for (n, msg, since) in removed {
         // quiet under a wrapper pinning a Gradle that still has it; without a wrapper, a
-        // current Gradle (8 or 9, which have none of these) runs the build
-        if major.is_none_or(|m| m >= since) {
+        // current Gradle (8 or 9, which have none of the pre-9 removals) runs the build. A 9.0
+        // removal needs a wrapper pinning 9 or later, as for the conventions: many builds still
+        // pin 8.
+        if major.is_none_or(|m| m >= since) && (since < 9 || major.is_some()) {
             v.push(at(n, "GradleRemovedApi", msg));
         }
     }
+}
+
+/// Project properties that came from plugin conventions, which Gradle 9.0 removed (the java,
+/// base, application, war, ear and project-report plugins'), and their replacements. Each
+/// was checked to work under Gradle 8.14.4 and to fail under 9.0.0 and 9.9.1, and each
+/// replacement to work under both.
+const CONVENTIONS: &[(&str, &str)] = &[
+    ("sourceCompatibility", "java { sourceCompatibility = ... }"),
+    ("targetCompatibility", "java { targetCompatibility = ... }"),
+    ("docsDirName", "java { docsDir = ... }"),
+    ("testResultsDirName", "java { testResultsDir = ... }"),
+    ("testReportDirName", "java { testReportDir = ... }"),
+    ("archivesBaseName", "base { archivesName = ... }"),
+    ("distsDirName", "base { distsDirectory = ... }"),
+    ("libsDirName", "base { libsDirectory = ... }"),
+    ("mainClassName", "application { mainClass = ... }"),
+    ("applicationName", "application { applicationName = ... }"),
+    (
+        "applicationDefaultJvmArgs",
+        "application { applicationDefaultJvmArgs = ... }",
+    ),
+    ("executableDir", "application { executableDir = ... }"),
+    ("webAppDirName", "the war task's webAppDirectory"),
+    ("appDirName", "the ear task's appDirectory"),
+    ("libDirName", "the ear task's libDirName"),
+    (
+        "projectReportDirName",
+        "the report tasks' own output settings",
+    ),
+];
+
+/// Blocks that run against a project, where a name falls through to the project's
+/// properties.
+const PROJECT_BLOCKS: &[&str] = &[
+    "allprojects",
+    "subprojects",
+    "project",
+    "configure",
+    "afterEvaluate",
+];
+
+/// GradleRemovedApi on a removed convention property (`CONVENTIONS`) set at the project
+/// level: `sourceCompatibility = 11` or `project.archivesBaseName = 'x'` at the top level of
+/// the script or in a `PROJECT_BLOCKS` block, and `mainClassName` in `application { }` or
+/// `archivesBaseName` in `base { }`, which fall through to the project too. Not in `java { }`
+/// or a task's block, which have properties of these names. Only setting is reported: a read
+/// may be of an extra property another script makes. Also gathers, into `ext`, the names
+/// the script makes extra properties of (`ext.x = `, `ext { x = }`), which it can then set.
+/// Report-only: `java { sourceCompatibility = v }` reads the names in `v` against the
+/// extension first, so moving the value there can change what it means.
+fn convention<'a>(
+    src: &'a str,
+    s: Node<'a>,
+    out: &mut Vec<(Node<'a>, &'a str, &'static str)>,
+    ext: &mut HashSet<&'a str>,
+) {
+    let Some(left) = s
+        .named_child(0)
+        .filter(|a| s.kind() == "expression_statement" && a.kind() == "assignment_expression")
+        .and_then(|a| a.child_by_field_name("left"))
+    else {
+        return;
+    };
+    let field = left.child_by_field_name("field");
+    let object = left.child_by_field_name("object").map(|o| text(o, src));
+    // `ext.x = `, `project.ext.x = `
+    if let (Some(f), Some(o)) = (field, object)
+        && (o == "ext" || o.ends_with(".ext"))
+    {
+        ext.insert(text(f, src));
+    }
+    let name = match left.kind() {
+        "identifier" => text(left, src),
+        "field_access" if object == Some("project") => field.map_or("", |f| text(f, src)),
+        _ => return,
+    };
+    let closures = || {
+        std::iter::successors(s.parent(), |p| p.parent())
+            .filter(|p| p.kind() == "closure")
+            .map(|cl| {
+                cl.parent()
+                    .and_then(|p| {
+                        if p.kind() == "argument_list" {
+                            p.parent()
+                        } else {
+                            Some(p)
+                        }
+                    })
+                    .and_then(|m| match m.kind() {
+                        "method_invocation" => m.child_by_field_name("function"),
+                        // `allprojects { }`
+                        "command_chain" => m.child_by_field_name("receiver"),
+                        _ => None,
+                    })
+                    .map_or("", |f| text(f, src))
+            })
+    };
+    if left.kind() == "identifier"
+        && closures()
+            .next()
+            .is_some_and(|o| o == "ext" || o.ends_with(".ext"))
+    {
+        ext.insert(name);
+    }
+    let Some((_, new)) = CONVENTIONS.iter().find(|c| c.0 == name) else {
+        return;
+    };
+    let project = closures().all(|o| {
+        PROJECT_BLOCKS.contains(&o)
+            || (o == "application" && name == "mainClassName")
+            || (o == "base" && matches!(name, "archivesBaseName" | "distsDirName" | "libsDirName"))
+    });
+    if project
+        && !std::iter::successors(s.parent(), |p| p.parent()).any(|p| p.kind() == "class_body")
+    {
+        out.push((s, name, new));
+    }
+}
+
+/// Whether a `gradle.properties` in the script's directory, or one above it up to the
+/// wrapper's, sets `name`: then it is a project property, which a build can still set
+/// (checked with Gradle 9.9.1).
+fn gradle_property(path: &Path, name: &str) -> bool {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    for d in dir.ancestors() {
+        let sets = read_small(&d.join("gradle.properties"), MAX_WRAPPER_BYTES).is_some_and(|p| {
+            p.lines().any(|l| {
+                l.trim_start()
+                    .strip_prefix(name)
+                    .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', '=', ':']))
+            })
+        });
+        if sets {
+            return true;
+        }
+        if d.join("gradle/wrapper/gradle-wrapper.properties").is_file() {
+            return false;
+        }
+    }
+    false
+}
+
+/// Adds to `declared` the configurations `n` makes: the names a `configurations { }` block
+/// (`n`) makes or reads, or `configurations.create('compile')` and the like.
+fn declares(src: &str, n: Node, declared: &mut HashSet<String>) {
+    if let Some(c) = call(n, src)
+        && let Some(b) = c.body
+        && c.name == "configurations"
+    {
+        for s in statements(b) {
+            // create('runtime'), register('runtime') { }, ...
+            if let Some(c) = call(s, src)
+                && DECLARING.contains(&c.name)
+                && let Some(name) = c.args.first().and_then(|a| constant_value(*a, src))
+            {
+                declared.insert(name);
+            }
+            let t = text(s, src);
+            let end = t
+                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .unwrap_or(t.len());
+            declared.insert(t[..end].to_string());
+        }
+        // a name the block reads makes it too, as Gradle runs it:
+        // `integrationTestRuntime.extendsFrom testRuntime` (#145)
+        crate::preorder(b, |x| {
+            if x.kind() == "identifier"
+                && x.parent()
+                    .is_none_or(|p| p.child_by_field_name("field") != Some(x))
+            {
+                declared.insert(text(x, src).to_string());
+            }
+            true
+        });
+    }
+    // configurations.create('compile'), maybeCreate, register, getByName, named
+    if n.kind() == "method_invocation"
+        && n.child_by_field_name("function").is_some_and(|f| {
+            let t = text(f, src);
+            DECLARING
+                .iter()
+                .any(|d| t.strip_suffix(d).is_some_and(|r| r.ends_with('.')))
+        })
+        && let Some(a) = n
+            .child_by_field_name("arguments")
+            .and_then(|a| a.named_child(0))
+        && let Some(name) = constant_value(a, src)
+    {
+        declared.insert(name);
+    }
+}
+
+/// The most bytes read of a script that may apply the one linted (`applier_declared`).
+const MAX_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The configurations made by the `.gradle` scripts that apply `path` with
+/// `apply from: 'deps.gradle'`, as a build script declares `testCompile` and the
+/// `dependencies.gradle` it applies uses it (#217). The scripts looked at are those in the
+/// script's directory and the ones above it, up to the build's root (the nearest directory
+/// with `settings.gradle`, `settings.gradle.kts` or `.git`; without one, only the script's
+/// own directory). The target must be a plain path to `path` relative to the applying
+/// script's directory: a URL, an interpolated name or a missing file applies nothing here.
+fn applier_declared(path: &Path) -> HashSet<String> {
+    let mut declared = HashSet::new();
+    let Ok(me) = path.canonicalize() else {
+        return declared;
+    };
+    let root = me.ancestors().skip(1).find(|d| {
+        ["settings.gradle", "settings.gradle.kts", ".git"]
+            .iter()
+            .any(|f| d.join(f).exists())
+    });
+    for dir in me.ancestors().skip(1) {
+        let scripts = std::fs::read_dir(dir).into_iter().flatten().flatten();
+        for p in scripts.map(|e| e.path()) {
+            if p.extension().is_none_or(|e| e != "gradle") || p == me {
+                continue;
+            }
+            let Some(src) = read_small(&p, MAX_SCRIPT_BYTES) else {
+                continue;
+            };
+            let tree = crate::parse(&src);
+            let mut applies = false;
+            crate::preorder(tree.root_node(), |n| {
+                applies |= apply_argument(&src, n, "from")
+                    .is_some_and(|t| dir.join(t).canonicalize().is_ok_and(|t| t == me));
+                !applies
+            });
+            if applies {
+                crate::preorder(tree.root_node(), |n| {
+                    declares(&src, n, &mut declared);
+                    true
+                });
+            }
+        }
+        if root.is_none_or(|r| r == dir) {
+            break;
+        }
+    }
+    declared
 }
 
 /// Core plugins removed from Gradle: id, the major that removed it, the replacement. From
@@ -322,6 +564,13 @@ const ARCHIVE_TASKS: &[&str] = &[
     "bootWar",
     "shadowJar",
 ];
+/// JavaExec's `main`, removed in Gradle 9.0: checked to work under 8.8 and to fail under
+/// 9.0.0 and 9.9.1 ("Could not set unknown property 'main'").
+const JAVA_EXEC_PROPS: &[(&str, &str)] = &[("main", "mainClass")];
+/// Task types that extend JavaExec.
+const JAVA_EXEC_TYPES: &[&str] = &["JavaExec", "BootRun"];
+/// JavaExec tasks that Spring Boot's plugin creates under these names.
+const JAVA_EXEC_TASKS: &[&str] = &["bootRun"];
 /// Blocks a task configuration block can sit in and still mean the task.
 const TASK_SCOPES: &[&str] = &[
     "allprojects",
@@ -364,7 +613,22 @@ fn removed_api<'a>(
             *since,
         ));
     }
-    if let Some(body) = archive_body(src, n) {
+    let bodies = [
+        (
+            task_body(src, n, ARCHIVE_TYPES, ARCHIVE_TASKS),
+            ARCHIVE_PROPS,
+            "archive tasks",
+            8,
+        ),
+        (
+            task_body(src, n, JAVA_EXEC_TYPES, JAVA_EXEC_TASKS),
+            JAVA_EXEC_PROPS,
+            "JavaExec tasks",
+            9,
+        ),
+    ];
+    for (body, props, tasks, since) in bodies {
+        let Some(body) = body else { continue };
         for s in statements(body) {
             let name = match call(s, src) {
                 Some(c) if !c.args.is_empty() && c.body.is_none() => Some(c.name),
@@ -380,13 +644,13 @@ fn removed_api<'a>(
                     .filter(|l| l.kind() == "identifier")
                     .map(|l| text(l, src)),
             };
-            if let Some((old, new)) = name.and_then(|x| ARCHIVE_PROPS.iter().find(|p| p.0 == x)) {
+            if let Some((old, new)) = name.and_then(|x| props.iter().find(|p| p.0 == x)) {
                 out.push((
                     s,
                     format!(
-                        "The `{old}` property of archive tasks was removed in Gradle 8.0; use {new}"
+                        "The `{old}` property of {tasks} was removed in Gradle {since}.0; use {new}"
                     ),
-                    8,
+                    since,
                 ));
             }
         }
@@ -411,30 +675,81 @@ fn removed_api<'a>(
     }
 }
 
+/// `exec { }` or `javaexec { }` (also `exec({ })`, `project.exec { }`,
+/// `rootProject.javaexec { }`), which Gradle 9.0 removed from the project and the build
+/// script: in a task action, a script method or at the top level it fails with "Could not
+/// find method exec()" (checked under 8.8, 9.0.0 and 9.9.1). Only with a closure: a bare
+/// `exec()` is an Exec task's own action. Not inside a class, whose own or inherited `exec`
+/// it may be, nor on another receiver (`execOperations.exec { }`, `providers.exec { }`),
+/// nor in a `with { }`, `tap { }` or `identity { }`, which hands the closure another
+/// delegate (gocd's `injected.execOps.with { exec { } }`).
+fn project_exec<'a>(src: &'a str, n: Node<'a>) -> Option<(Node<'a>, &'a str)> {
+    let (name, closure) = match n.kind() {
+        "command_chain" => {
+            let mut c = n.walk();
+            let args: Vec<_> = n.children_by_field_name("argument", &mut c).collect();
+            (
+                n.child_by_field_name("receiver")
+                    .filter(|r| r.kind() == "identifier")?,
+                matches!(args[..], [a] if a.kind() == "closure"),
+            )
+        }
+        "method_invocation" => {
+            let f = n.child_by_field_name("function")?;
+            let name = match f.kind() {
+                "identifier" => f,
+                "field_access"
+                    if f.child_by_field_name("object")
+                        .is_some_and(|o| matches!(text(o, src), "project" | "rootProject")) =>
+                {
+                    f.child_by_field_name("field")?
+                }
+                _ => return None,
+            };
+            let only_closure_arg = n.child_by_field_name("arguments").is_some_and(|a| {
+                a.named_child_count() == 1
+                    && a.named_child(0).is_some_and(|x| x.kind() == "closure")
+            });
+            (
+                name,
+                n.child_by_field_name("closure").is_some() || only_closure_arg,
+            )
+        }
+        _ => return None,
+    };
+    let name = text(name, src);
+    (closure
+        && matches!(name, "exec" | "javaexec")
+        && !std::iter::successors(n.parent(), |p| p.parent()).any(|p| p.kind() == "class_body")
+        && !owners(n, src).any(|o| matches!(o, "with" | "tap" | "identity")))
+    .then_some((n, name))
+}
+
+/// Whether `n`, a `configurations.<name>`, runs only when an `if` or `?:` above it found
+/// the configuration: `if (configurations.hasProperty('compile')) { configurations.compile }`
+/// (or `findByName`), which a Gradle without it never evaluates (#222).
+fn guarded(src: &str, n: Node, name: &str) -> bool {
+    let checks = ["hasProperty", "findByName"]
+        .map(|m| [format!("{m}('{name}')"), format!("{m}(\"{name}\")")]);
+    let mut inner = n;
+    std::iter::successors(n.parent(), |p| p.parent()).any(|p| {
+        let child = std::mem::replace(&mut inner, p);
+        matches!(p.kind(), "if_statement" | "ternary_expression")
+            && p.child_by_field_name("consequence")
+                .is_some_and(|c| c.id() == child.id())
+            && p.child_by_field_name("condition").is_some_and(|c| {
+                let t = text(c, src);
+                checks.iter().flatten().any(|k| t.contains(k.as_str()))
+            })
+    })
+}
+
 /// The plugin id `n` applies: `apply plugin: 'java'` or `apply(plugin: 'java')` (`n` is the
 /// named argument), or `id 'java'` in a `plugins { }` block (`n` is the statement; a
 /// `version` after the id is allowed).
 fn applied_plugin(src: &str, n: Node) -> Option<String> {
     if n.kind() == "named_argument" {
-        let val = n.child_by_field_name("value")?;
-        let applies = n
-            .child_by_field_name("key")
-            .is_some_and(|k| text(k, src) == "plugin")
-            && val.kind() == "string_literal"
-            && n.parent()
-                .and_then(|p| {
-                    if p.kind() == "argument_list" {
-                        p.parent()
-                    } else {
-                        Some(p)
-                    }
-                })
-                .and_then(|p| {
-                    p.child_by_field_name("receiver")
-                        .or_else(|| p.child_by_field_name("function"))
-                })
-                .is_some_and(|f| text(f, src) == "apply");
-        return applies.then(|| constant_value(val, src)).flatten();
+        return apply_argument(src, n, "plugin");
     }
     let c = call(n, src)?;
     let a = c.args.first().filter(|a| {
@@ -446,6 +761,33 @@ fn applied_plugin(src: &str, n: Node) -> Option<String> {
         return None;
     }
     constant_value(*a, src)
+}
+
+/// The string the named argument `n` passes to `apply` as `key`: `apply plugin: 'java'`,
+/// `apply(from: 'deps.gradle')`.
+fn apply_argument(src: &str, n: Node, key: &str) -> Option<String> {
+    if n.kind() != "named_argument" {
+        return None;
+    }
+    let val = n.child_by_field_name("value")?;
+    let applies = n
+        .child_by_field_name("key")
+        .is_some_and(|k| text(k, src) == key)
+        && val.kind() == "string_literal"
+        && n.parent()
+            .and_then(|p| {
+                if p.kind() == "argument_list" {
+                    p.parent()
+                } else {
+                    Some(p)
+                }
+            })
+            .and_then(|p| {
+                p.child_by_field_name("receiver")
+                    .or_else(|| p.child_by_field_name("function"))
+            })
+            .is_some_and(|f| text(f, src) == "apply");
+    applies.then(|| constant_value(val, src)).flatten()
 }
 
 /// Calls in a `configurations { }` block (or on `configurations.`) that make or name a
@@ -477,10 +819,10 @@ fn owners<'a>(n: Node<'a>, src: &'a str) -> impl Iterator<Item = &'a str> {
         })
 }
 
-/// The configuration block of an archive task: `jar { }` (where it means the task),
-/// `task x(type: Jar) { }`, `tasks.register('x', Zip) { }`, `tasks.withType(Jar) { }` or
-/// `tasks.withType(Jar).configureEach { }`.
-fn archive_body<'a>(src: &'a str, n: Node<'a>) -> Option<Node<'a>> {
+/// The configuration block of a task of one of `types`: one of the `tasks` names alone
+/// (`jar { }`, where it means the task), `task x(type: Jar) { }`, `tasks.register('x', Zip)
+/// { }`, `tasks.withType(Jar) { }` or `tasks.withType(Jar).configureEach { }`.
+fn task_body<'a>(src: &'a str, n: Node<'a>, types: &[&str], tasks: &[&str]) -> Option<Node<'a>> {
     let typed = |m: Node| {
         let Some(a) = m.child_by_field_name("arguments") else {
             return false;
@@ -497,7 +839,7 @@ fn archive_body<'a>(src: &'a str, n: Node<'a>) -> Option<Node<'a>> {
             };
             x.is_some_and(|x| {
                 matches!(x.kind(), "identifier" | "field_access")
-                    && ARCHIVE_TYPES.contains(&last(text(x, src)))
+                    && types.contains(&last(text(x, src)))
             })
         })
     };
@@ -513,7 +855,7 @@ fn archive_body<'a>(src: &'a str, n: Node<'a>) -> Option<Node<'a>> {
                     && f.child_by_field_name("object")
                         .is_some_and(|o| o.kind() == "method_invocation" && typed(o)))
                 || (f.kind() == "identifier"
-                    && ARCHIVE_TASKS.contains(&text(f, src))
+                    && tasks.contains(&text(f, src))
                     && n.child_by_field_name("arguments")
                         .is_none_or(|a| a.named_child_count() == 0)
                     && in_scope());
@@ -521,7 +863,7 @@ fn archive_body<'a>(src: &'a str, n: Node<'a>) -> Option<Node<'a>> {
         }
         "command_chain" => {
             let c = call(n, src)?;
-            (ARCHIVE_TASKS.contains(&c.name) && c.args.is_empty() && in_scope())
+            (tasks.contains(&c.name) && c.args.is_empty() && in_scope())
                 .then_some(c.body)
                 .flatten()
         }
@@ -550,18 +892,18 @@ fn wrapper_version(path: &Path) -> Option<(u32, u32)> {
         .ancestors()
         .map(|d| d.join("gradle/wrapper/gradle-wrapper.properties"))
         .find(|p| p.is_file())?;
-    version(&read_small(&props)?)
+    version(&read_small(&props, MAX_WRAPPER_BYTES)?)
 }
 
 /// The real file is a few hundred bytes.
 const MAX_WRAPPER_BYTES: u64 = 64 * 1024;
 
-/// `p` if it is a regular file of at most `MAX_WRAPPER_BYTES`, in UTF-8. A FIFO or device
+/// `p` if it is a regular file of at most `max` bytes, in UTF-8. A FIFO or device
 /// is never opened (opening a FIFO waits for a writer); one swapped in between the check and
 /// the open is the race the source reads accept too (see `write_in_place`).
-fn read_small(p: &Path) -> Option<String> {
+fn read_small(p: &Path, max: u64) -> Option<String> {
     use std::io::Read;
-    let ok = |m: std::fs::Metadata| m.is_file() && m.len() <= MAX_WRAPPER_BYTES;
+    let ok = |m: std::fs::Metadata| m.is_file() && m.len() <= max;
     if !std::fs::metadata(p).is_ok_and(ok) {
         return None;
     }
@@ -570,8 +912,8 @@ fn read_small(p: &Path) -> Option<String> {
         return None;
     }
     let mut bytes = Vec::new();
-    f.take(MAX_WRAPPER_BYTES + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > MAX_WRAPPER_BYTES {
+    f.take(max + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > max {
         return None;
     }
     String::from_utf8(bytes).ok()
@@ -1216,6 +1558,42 @@ mod tests {
     }
 
     #[test]
+    fn removed_configurations_declared_by_an_applying_script() {
+        // build.gradle declares testCompile and applies deps.gradle, which uses it (#217)
+        let root = std::env::temp_dir().join(format!("groovyfmt-applied-{}", std::process::id()));
+        let sub = root.join("gradle");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("settings.gradle"), "").unwrap();
+        let uses = "dependencies {\n    testCompile 'a:b:1'\n}\n";
+        let run = |p: &Path| {
+            std::fs::write(p, uses).unwrap();
+            rules(p.to_str().unwrap(), uses).len()
+        };
+        let build = |s: &str| std::fs::write(root.join("build.gradle"), s).unwrap();
+        build(
+            "configurations { testCompile }\napply from: 'deps.gradle'\napply(from: 'gradle/sub.gradle')\n",
+        );
+        // declared in the applying script, also one directory up
+        assert_eq!(
+            (run(&root.join("deps.gradle")), run(&sub.join("sub.gradle"))),
+            (0, 0)
+        );
+        // a script nothing applies, a URL, an interpolated name: reported as before
+        assert_eq!(run(&root.join("other.gradle")), 1);
+        build(
+            "configurations { testCompile }\napply from: 'https://x/deps.gradle'\napply from: \"${d}.gradle\"\n",
+        );
+        assert_eq!(run(&root.join("deps.gradle")), 1);
+        // applied but declared nowhere
+        build("apply from: 'deps.gradle'\n");
+        assert_eq!(run(&root.join("deps.gradle")), 1);
+        // the applying script names a missing file
+        build("configurations { testCompile }\napply from: 'gone.gradle'\n");
+        assert_eq!(run(&root.join("deps.gradle")), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn jcenter() {
         let src = "repositories {\n    jcenter()\n    mavenCentral()\n}\nbuildscript { repositories { jcenter { url 'x' } } }\n";
         assert_eq!(
@@ -1304,6 +1682,116 @@ mod tests {
         assert_eq!(run("7.6"), vec![1, 2]);
         assert_eq!(run("8.14"), vec![1, 2, 3]);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Gradle 9.0's convention removals (#218), each checked under Gradle 8.14.4 and 9.0.0.
+    #[test]
+    fn removed_conventions() {
+        let root =
+            std::env::temp_dir().join(format!("groovyfmt-convention-{}", std::process::id()));
+        let sub = root.join("sub");
+        std::fs::create_dir_all(root.join("gradle/wrapper")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        let props = root.join("gradle/wrapper/gradle-wrapper.properties");
+        let wrapper = |v: &str| {
+            std::fs::write(&props, format!("distributionUrl=https\\://services.gradle.org/distributions/gradle-{v}-bin.zip\n")).unwrap()
+        };
+        let lines = |dir: &Path, name: &str, src: &str| {
+            rules(dir.join(name).to_str().unwrap(), src)
+                .iter()
+                .filter(|r| r.0 == "GradleRemovedApi")
+                .map(|r| r.1)
+                .collect::<Vec<_>>()
+        };
+        let src = "apply plugin: 'application'\nsourceCompatibility = 1.8\nproject.targetCompatibility = '11'\nmainClassName = 'a.B'\narchivesBaseName = 'x'\napplicationDefaultJvmArgs += ['-X']\nif (ci) { libsDirName = 'l' }\nallprojects { docsDirName = 'd' }\nsubprojects {\n    afterEvaluate { webAppDirName = 'w' }\n}\nproject(':a') { appDirName = 'a' }\napplication { mainClassName = 'a.B' }\nbase { archivesBaseName = 'y' }\n";
+        wrapper("9.0.0");
+        assert_eq!(
+            lines(&root, "build.gradle", src),
+            vec![2, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14]
+        );
+        // under Gradle 8, or with no wrapper, quiet: many builds still pin 8
+        wrapper("8.14.4");
+        assert_eq!(lines(&root, "build.gradle", src), Vec::<usize>::new());
+        assert_eq!(rules("build.gradle", src), vec![]);
+        wrapper("9.9.1");
+        // the new forms, a task's own properties, a read, an extra property the script
+        // makes, a local variable, a class's code, a settings script
+        let quiet = "java {\n    sourceCompatibility = 11\n    targetCompatibility = 11\n}\napplication {\n    mainClass = 'a.B'\n    applicationName = 'x'\n    executableDir = 'b'\n}\nbase { archivesName = 'x' }\ncompileJava { sourceCompatibility = 11 }\ntasks.withType(JavaCompile) { targetCompatibility = 11 }\ntasks.named('x').configure { sourceCompatibility = 11 }\nshadowJar { mainClassName = 'a.B' }\njar { manifest { attributes 'Main-Class': mainClassName } }\next.executableDir = 'b'\nexecutableDir = 'c'\next {\n    webAppDirName = 'w'\n}\nwebAppDirName = 'v'\ndef appDirName = 'a'\nappDirName = 'z'\nclass C { def f() { libDirName = 1 } }\nfoo.mainClassName = 'x'\n";
+        assert_eq!(lines(&root, "build.gradle", quiet), Vec::<usize>::new());
+        assert_eq!(
+            lines(&root, "settings.gradle", "sourceCompatibility = 1"),
+            Vec::<usize>::new()
+        );
+        // a gradle.properties up to the wrapper's directory that sets it makes it a project
+        // property, which a build can set
+        let src = "mainClassName = 'a.B'\nsourceCompatibility = 1.8\n";
+        assert_eq!(lines(&sub, "build.gradle", src), vec![1, 2]);
+        std::fs::write(sub.join("gradle.properties"), "# x\nmainClassName=a.C\n").unwrap();
+        std::fs::write(root.join("gradle.properties"), "sourceCompatibility : 8\n").unwrap();
+        assert_eq!(lines(&sub, "build.gradle", src), Vec::<usize>::new());
+        std::fs::write(root.join("gradle.properties"), "sourceCompatibilityX=8\n").unwrap();
+        assert_eq!(lines(&sub, "build.gradle", src), vec![2]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn removed_exec() {
+        // #222: Project/Script exec and javaexec and JavaExec's `main`, removed in 9.0
+        let root = std::env::temp_dir().join(format!("groovyfmt-exec-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("gradle/wrapper")).unwrap();
+        let props = root.join("gradle/wrapper/gradle-wrapper.properties");
+        let wrapper = |v: &str| {
+            std::fs::write(&props, format!("distributionUrl=https\\://services.gradle.org/distributions/gradle-{v}-bin.zip\n")).unwrap()
+        };
+        let lines = |name: &str, src: &str| {
+            rules(root.join(name).to_str().unwrap(), src)
+                .iter()
+                .filter(|r| r.0 == "GradleRemovedApi")
+                .map(|r| r.1)
+                .collect::<Vec<_>>()
+        };
+        let src = "def run() { exec { commandLine 'a' } }\ntasks.register('a') { doLast { exec { commandLine 'a' } } }\ntask b { doLast { javaexec { mainClass = 'X' } } }\ndef r = exec { ignoreExitValue = true }\nexec({ commandLine 'a' })\nproject.exec { commandLine 'a' }\nrootProject.javaexec { mainClass = 'X' }\ntasks.register('c', JavaExec) { main = 'X' }\ntask d(type: JavaExec) {\n    main 'X'\n}\ntasks.withType(JavaExec).configureEach { main = 'X' }\nbootRun { main = 'X' }\n";
+        wrapper("9.0.0");
+        assert_eq!(
+            lines("build.gradle", src),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 13]
+        );
+        wrapper("9.9.1");
+        assert_eq!(
+            lines("build.gradle", src),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 13]
+        );
+        // under Gradle 8, or with no wrapper, quiet: they work there
+        wrapper("8.8");
+        assert_eq!(lines("build.gradle", src), Vec::<usize>::new());
+        assert_eq!(rules("build.gradle", src), vec![]);
+        wrapper("9.0.0");
+        // ExecOperations, providers, an Exec task, a task's own exec(), a class's code, the
+        // script's own exec method, other receivers, JavaExec's mainClass, a settings script
+        let quiet = "interface I { @Inject ExecOperations getOps() }\ndef ops = objects.newInstance(I).ops\ntasks.register('a') { doLast { ops.exec { commandLine 'a' } } }\nexecOperations.javaexec { mainClass = 'X' }\nproviders.exec { commandLine 'a' }\ntasks.register('b', Exec) { commandLine 'a' }\nclass T extends Exec { void run() { exec() } }\nclass U { void run(p) { exec { } } }\nfoo.exec { }\ntasks.register('d') { doLast { injected.execOps.with { exec { commandLine 'a' } } } }\ntasks.register('c', JavaExec) { mainClass = 'X' }\nexec\n";
+        assert_eq!(lines("build.gradle", quiet), Vec::<usize>::new());
+        assert_eq!(
+            lines(
+                "build.gradle",
+                "def exec(Closure c) { }\nexec { commandLine 'a' }\n"
+            ),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            lines("settings.gradle", "exec { commandLine 'a' }\n"),
+            Vec::<usize>::new()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn removed_configuration_reference_guarded_by_a_check() {
+        // #222: WebViewUpgrade publish.gradle, never evaluated on 7+
+        let src = "if (configurations.hasProperty(\"compile\")) {\n    classpath += configurations.compile\n}\nx = configurations.findByName('runtime') ? configurations.runtime : []\nif (configurations.hasProperty('compile')) {\n} else {\n    y = configurations.compile\n}\nif (configurations.hasProperty('runtime')) { z = configurations.compile }\n";
+        assert_eq!(
+            rules("build.gradle", src),
+            vec![("GradleRemovedApi", 7), ("GradleRemovedApi", 9)]
+        );
     }
 
     #[test]

@@ -760,6 +760,24 @@ pub const RULES: &[Rule] = &[
         good: "class MathSpec extends Specification {\n    def 'max'() {\n        expect:\n        Math.max(a, b) == c\n        where:\n        a | b | c\n        1 | 2 | 2\n    }\n}",
         fixable: false,
     },
+    Rule {
+        name: "SpockUnassertedCondition",
+        default: true,
+        description: "a comparison, a predicate call (xs.contains(x), s.startsWith(p), m.isEmpty(), ...) or a property read (x.done, xs[0].valid) in a then: or expect: block nested in an if, loop, switch, try or a .each { } (eachWithIndex, reverseEach, forEach, times) closure, which Spock never asserts",
+        why: "Spock turns only the top-level expression statements of a then: or expect: block into conditions. A comparison, a predicate call such as `xs.contains(x)` or `!m.isEmpty()`, or a property read such as `xs[0].valid`, inside `if`/`else`, a loop, a `switch` case, `try` or a closure passed to `each` is evaluated and thrown away, so the check can never fail. Write `assert` in front of it, or check a collection with `verifyEach` or `verifyAll { }` (Spock asserts conditions nested in `with { }`, `verifyAll { }`, `verifyEach` and `@Verify` helpers, so those aren't reported). Checked against Spock 2.4.",
+        bad: "class ResultSpec extends Specification {\n    def 'parses'() {\n        when:\n        def r = parse(input)\n\n        then:\n        if (valid) {\n            r.value == 42\n        }\n        r.items.each { it.size() > 0 }\n    }\n}",
+        good: "class ResultSpec extends Specification {\n    def 'parses'() {\n        when:\n        def r = parse(input)\n\n        then:\n        if (valid) {\n            assert r.value == 42\n        }\n        r.items.every { it.size() > 0 }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "StringLeftShiftDiscarded",
+        default: true,
+        description: "`s << x` as a statement on a local String, which builds a new StringBuffer and leaves s unchanged",
+        why: "On a String, `<<` returns a new StringBuffer holding both values and never changes the String, so `s << x` on its own line does nothing: whatever it was meant to collect is lost (a test that gathers failures into `s` this way never reports them). Reported only for a local declared `String` or with a plain string literal and never assigned anything else, when the statement's value isn't returned. Write `s += x`, or start from `new StringBuilder()`.",
+        bad: "def missing = ''\nfor (name in names) {\n    if (!found(name)) {\n        missing << name << '\\n'\n    }\n}\nif (missing) {\n    throw new IllegalStateException(\"missing:\\n$missing\")\n}",
+        good: "def missing = new StringBuilder()\nfor (name in names) {\n    if (!found(name)) {\n        missing << name << '\\n'\n    }\n}\nif (missing) {\n    throw new IllegalStateException(\"missing:\\n$missing\")\n}",
+        fixable: false,
+    },
 ];
 
 mod basic;
@@ -816,11 +834,23 @@ pub fn opt_in_fixes(vs: &mut [Violation], src: &str, compile: Option<&str>) {
 
 /// Lint `src` as the file at `path`, whose name decides the Jenkinsfile and Gradle rules.
 pub fn lint_file(path: &Path, src: &str) -> Result<Vec<Violation>, &'static str> {
+    lint_with(path, src, &|_| None)
+}
+
+/// `lint_file`, with `base` telling whether a superclass declared elsewhere is a Spock spec
+/// (`Projects::spec_base`).
+pub fn lint_with(
+    path: &Path,
+    src: &str,
+    base: &dyn Fn(&str) -> Option<bool>,
+) -> Result<Vec<Violation>, &'static str> {
     let tree = crate::parse(src);
     if tree.root_node().has_error() {
         return Err("parse error");
     }
     let mut v = Vec::new();
+    // this file's classes, for the Spock rules, read the first time a class needs them
+    let local = std::cell::OnceCell::new();
     imports(src, &tree, &mut v);
     jenkins::check(path, src, tree.root_node(), &mut v);
     gradle::check(path, src, tree.root_node(), &mut v);
@@ -846,7 +876,7 @@ pub fn lint_file(path: &Path, src: &str) -> Result<Vec<Violation>, &'static str>
         }
         match kind {
             "string_literal" => unnecessary_gstring(src, n, &mut v),
-            ";" => unnecessary_semicolon(n, nodes.get(i + 1..).unwrap_or(&[]), &mut v),
+            ";" => unnecessary_semicolon(src, n, nodes.get(i + 1..).unwrap_or(&[]), &mut v),
             "catch_clause" => empty_catch(src, n, &mut v),
             "if_statement" => if_statement(n, &mut v),
             "while_statement" if !condition_works(n) => {
@@ -888,7 +918,7 @@ pub fn lint_file(path: &Path, src: &str) -> Result<Vec<Violation>, &'static str>
             "map_literal" => duplicate_map_key(src, n, &mut v),
             "switch_block" => duplicate_case(src, n, &mut v),
             "binary_expression" => comparison_with_self(src, n, &mut v),
-            "class_declaration" => spock::class(src, n, &mut v),
+            "class_declaration" => spock::class(src, n, &local, base, &mut v),
             _ => {}
         }
     }
@@ -1247,12 +1277,17 @@ fn unnecessary_gstring(src: &str, n: Node, v: &mut Vec<Violation>) {
 /// empty body (`while (it.next());`), or one before a line starting with `{`
 /// (`foo();` then `{ -> x }.call()`) or `++` / `--` (`a[0];` then `++n`): either way
 /// removing it would change the program, here by making the closure an argument of the
-/// statement before, or the `++` a postfix increment of it.
-fn unnecessary_semicolon(n: Node, rest: &[Node], v: &mut Vec<Violation>) {
+/// statement before, or the `++` a postfix increment of it. Nor one between top-level
+/// statements that Groovy 3+ would join into a method declaration (`joins_declaration`).
+fn unnecessary_semicolon(src: &str, n: Node, rest: &[Node], v: &mut Vec<Violation>) {
     if n.parent().is_some_and(|p| {
         p.kind().contains("enum")
             || p.kind() == "for_statement"
             || (p.kind() == "while_statement" && p.child_by_field_name("body") == Some(n))
+            || (p.kind() == "source_file"
+                && statement_beside(n, Node::prev_sibling)
+                    .zip(statement_beside(n, Node::next_sibling))
+                    .is_some_and(|(a, b)| joins_declaration(src, a, b)))
     }) {
         return;
     }
@@ -1274,6 +1309,53 @@ fn unnecessary_semicolon(n: Node, rest: &[Node], v: &mut Vec<Violation>) {
             )
         });
     }
+}
+
+/// The statement next to `n` in the direction of `step`, past comments and other `;`s.
+fn statement_beside<'t>(n: Node<'t>, step: fn(&Node<'t>) -> Option<Node<'t>>) -> Option<Node<'t>> {
+    let mut x = step(&n)?;
+    while x.kind().contains("comment") || x.kind() == ";" {
+        x = step(&x)?;
+    }
+    x.is_named().then_some(x)
+}
+
+/// Whether Groovy 3 and 4 read the top-level statements `a` and `b`, on separate lines with
+/// no `;` between them, as one method declaration (#211): `a` a type (a name whose last part
+/// is capitalized: `FOO`, `a.B`, `List<String>`, `String[]`) and `b` a call
+/// (`bar()`, `'bar'(x)`), so `FOO` then `bar()` declares `FOO bar()`, an error without a
+/// body, and `FOO` then `bar(x) { x }` silently declares a method. Groovy 2 reads two
+/// statements. Any call is taken, though only one whose arguments read as parameters
+/// (`bar(x)`, `bar(Foo)`, not `bar(1)`) joins.
+pub(crate) fn joins_declaration(src: &str, a: Node, b: Node) -> bool {
+    if a.kind() != "expression_statement" || b.kind() != "expression_statement" {
+        return false;
+    }
+    let mut t = text(a, src).trim_end();
+    while let Some(r) = t.strip_suffix("[]") {
+        t = r.trim_end();
+    }
+    if t.ends_with('>') {
+        t = t.split('<').next().unwrap_or(t);
+    }
+    let ident = |c: char| java_part(c) || c == '$';
+    let typed = !matches!(t.split('.').next().map(str::trim), Some("this" | "super"))
+        && t.split('.')
+            .map(str::trim)
+            .all(|p| !p.is_empty() && p.chars().all(ident))
+        && t.rsplit('.')
+            .next()
+            .is_some_and(|p| p.trim().starts_with(char::is_uppercase));
+    let call = text(b, src);
+    let name = match call.chars().next() {
+        Some(q @ ('\'' | '"')) => call[1..].find(q).map_or(call.len(), |i| i + 2),
+        _ => call.find(|c| !ident(c)).unwrap_or(call.len()),
+    };
+    typed
+        && name > 0
+        && call[name..]
+            .trim_start_matches([' ', '\t'])
+            .starts_with('(')
 }
 
 /// EmptyCatchBlock, with CodeNarc's default exemption for `ignore` / `ignored` parameter names.
@@ -1978,8 +2060,8 @@ mod tests {
             lint(src).expect("parses").iter().map(|v| v.rule).collect();
         let jenkins = "pipeline {\n agent foo\n agent none\n def x = 1\n bogus { }\n options { parameters([]) }\n stages {\n  stage(\"${x}\") {\n   when { onBranch 'x' }\n   steps { if (x) { } }\n  }\n  stage('a') { }\n  stage('a') { steps { echo 1 } }\n }\n}\n";
         let gradle = "repositories { jcenter() }\ndependencies { compile 'a:b:+' }\ntask t << { }\nversion '1'\ndependencies {\n implementation('a:b:1')\n implementation group: 'a', name: 'b'\n}\n";
-        let spock = "class S extends Specification {\n def f() {\n  when:\n  f()\n  then: 'x'\n  where:\n  a | b\n  2 | 3 | 4\n }\n def g() {\n  then:\n  x\n }\n}\n";
-        let more = "package p\nimport p.Q\nimport java.util.Date\nclass K {\n private int pf\n private void m() { }\n static { }\n { }\n boolean equals(Object o) { true }\n int hashcode() { 1 }\n String toString() { null }\n}\nclass L {\n boolean equals(String s) { true }\n}\ndef g() {\n def u = 1\n return 1\n f()\n}\ntry { f() } finally { return 1; throw new E(); assert x }\nswitch (x) { }\ndef s = [1, 1] as Set\ndef t = true ? 1 : 2\nassert true\nif (1 == 2) { f() }\nif (x != null || x.a) { f() }\nif (x % 2 == 1) { f() }\nl.removeAll(l)\nthrow RuntimeException()\nvoid h() { try { f() } catch (e) { new BadException(e) } }\nDate d = new Q()\ndef bd = new BigDecimal(1.5)\nif (a | b) { f() }\ndef nn = !!x\nsynchronized (l) { }\nfor (; c;) { f() }\nInteger.getInteger('p')\ndef r = (int) Math.random()\ndef io = !x instanceof String\ndef m1 = y % 1\nf(a,,b)\n";
+        let spock = "class S extends Specification {\n def f() {\n  when:\n  f()\n  then: 'x'\n  where:\n  a | b\n  2 | 3 | 4\n }\n def g() {\n  then:\n  x\n }\n def h() {\n  expect:\n  xs.each { it > 0 }\n }\n}\n";
+        let more = "package p\nimport p.Q\nimport java.util.Date\nclass K {\n private int pf\n private void m() { }\n static { }\n { }\n boolean equals(Object o) { true }\n int hashcode() { 1 }\n String toString() { null }\n}\nclass L {\n boolean equals(String s) { true }\n}\ndef g() {\n def u = 1\n return 1\n f()\n}\ntry { f() } finally { return 1; throw new E(); assert x }\nswitch (x) { }\ndef s = [1, 1] as Set\ndef t = true ? 1 : 2\nassert true\nif (1 == 2) { f() }\nif (x != null || x.a) { f() }\nif (x % 2 == 1) { f() }\nl.removeAll(l)\nthrow RuntimeException()\nvoid h() { try { f() } catch (e) { new BadException(e) } }\nDate d = new Q()\ndef bd = new BigDecimal(1.5)\nif (a | b) { f() }\ndef nn = !!x\nsynchronized (l) { }\nfor (; c;) { f() }\nInteger.getInteger('p')\ndef r = (int) Math.random()\ndef io = !x instanceof String\ndef m1 = y % 1\nf(a,,b)\nvoid sl(l) {\n def sx = ''\n for (c in l) { sx << c }\n}\n";
         for (name, src) in [
             ("A.groovy", more),
             ("B.groovy", "// groovyfmt-ignore DeadCode\nprintln 1\n"),
@@ -2074,6 +2156,79 @@ mod tests {
             rules("def x = f()[0];\n++n;\nm()\ny();\n--n\n"),
             vec![("UnnecessarySemicolon", 2)]
         );
+    }
+
+    #[test]
+    fn semicolon_that_keeps_a_method_declaration_away_is_kept() {
+        // #211, each checked on Groovy 2.4.21, 3.0.25 and 4.0.24: without the `;`, Groovy 3+
+        // reads a top-level type then a call on the next line as a method declaration, an
+        // error without a body (`FOO bar()`) and a new method with one (`FOO bar() { 1 }`)
+        let semis = |src: &str| {
+            lint(src)
+                .expect("parses")
+                .into_iter()
+                .filter(|v| v.rule == "UnnecessarySemicolon")
+                .count()
+        };
+        for src in [
+            "FOO;\nbar()\n",
+            "Foo;\nbar(int x)\n",
+            "FOO;\nbar() { 1 }\n",
+            "FOO;\nbar(x) { x }\n",
+            "FOO;\nbar()\n{ 1 }\n",
+            "a.B;\nbar()\n",
+            "java.util.List;\nbar()\n",
+            "FOO.BAR;\nbar()\n",
+            "Foo.Bar;\nbar(a, b)\n",
+            "List<String>;\nbar()\n",
+            "Foo<T>;\nbar()\n",
+            "String[];\nbar()\n",
+            "FOO;\nbar(x)\n",
+            "FOO;\nbar(x = 1)\n",
+            "FOO;\nbar(Foo)\n",
+            "FOO;\nbar(Foo x, int y)\n",
+            "FOO;\nbar(it)\n",
+            "FOO;\n'bar'()\n",
+            "FOO;\n\"bar\"()\n",
+            "FOO;\nBar()\n",
+            "FOO;\nyield()\n",
+            "FOO; // c\n\n// d\nbar()\n",
+            "FOO;;\nbar()\n",
+            "FOO /* c */;\nbar()\n",
+            "FOO;\nbar ()\n",
+            "class A {}\nFOO;\nbar()\n",
+            // conservative: Groovy reads these two statements, as no argument can be a parameter
+            "FOO;\nbar(1)\n",
+            "FOO;\nbar(x.y)\n",
+        ] {
+            assert_eq!(semis(src), 0, "{src:?}");
+        }
+        // same meaning without the `;` on all three
+        for src in [
+            "foo;\nbar()\n",
+            "a.b;\nbar()\n",
+            "A.b;\nbar()\n",
+            "this.FOO;\nbar()\n",
+            "super.FOO;\nbar()\n",
+            "FOO.class;\nbar()\n",
+            "L: FOO;\nbar()\n",
+            "x = FOO;\nbar()\n",
+            "foo();\nbar()\n",
+            "FOO();\nbar()\n",
+            "String x;\nbar()\n",
+            "def x;\nbar()\n",
+            "FOO;\nbar x\n",
+            "FOO;\nbar\n",
+            "FOO;\nbar = 1\n",
+            "FOO;\nbar {}\n",
+            "FOO;\ndef bar() {}\n",
+            // not at the top level, where no method can be declared
+            "def m() {\n  FOO;\n  bar()\n}\n",
+            "c = {\n  FOO;\n  bar()\n}\n",
+            "if (c) {\n  FOO;\n  bar()\n}\n",
+        ] {
+            assert_eq!(semis(src), 1, "{src:?}");
+        }
     }
 
     #[test]
