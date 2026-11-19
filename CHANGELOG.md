@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.30.1 (2026-11-19)
+
+### Added
+
+- The Gradle plugin has a README, `gradle-plugin/README.md`, with its `plugins { }` line, tasks and options, and it is the plugin's website on the Gradle Plugin Portal.
 
 ### Fixed
 
