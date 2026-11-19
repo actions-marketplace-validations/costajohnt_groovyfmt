@@ -358,6 +358,10 @@ module.exports = grammar({
     // §5.5 — the name an operator follows in a braceless if body's one command
     // argument, `if (c) o.f a - b` then `else` (see `_bare_operator_command`).
     $._command_operand,
+    // §5.5 — zero-width: in a parenthesized command, the first argument is a
+    // name an index or a binary operator follows on its line, which starts an
+    // expression: `if (a.b c[0] - n)`, `while (a.b c - 1)`.
+    $._paren_command_start,
     // Never referenced by a rule: valid only during error recovery, when
     // the scanner must not emit context-sensitive tokens.
     $._error_sentinel,
@@ -3231,12 +3235,16 @@ module.exports = grammar({
               $._expression,
               alias($._command_quoted_named_argument, $.named_argument),
             ))),
+            // `if (a.b c[0] - n)` is `a.b(c[0] - n)`: a name an index or a binary
+            // operator follows (see `_paren_command_start`)
+            seq($._paren_command_start, field('argument', $._expression)),
             field('argument', alias($._command_named_argument, $.named_argument)),
+            // `(f a : 1)`: a key a space keeps from its `:`, which the scanner
+            // leaves to the grammar after looking past the space
+            field('argument', alias($._paren_named_argument, $.named_argument)),
             field('argument', $.identifier),
             // `if (valueOf findProperty(s, 'x'))`
             field('argument', alias($._name_call, $.method_invocation)),
-            // `if (a.b c[0])` is `a.b(c[0])`
-            field('argument', alias($._name_subscript, $.subscript_expression)),
           ),
           repeat($._command_later_argument),
           // `(page.optionList 0 isEmpty())`: a call chained after the argument,
@@ -3260,12 +3268,10 @@ module.exports = grammar({
       optional(choice($.identifier, $.string_literal)),
     ),
 
-    _name_subscript: $ => seq(
-      field('object', $.identifier),
-      alias($._subscript_open, '['),
-      field('index', $._subscript_index),
-      repeat(seq(',', field('index', $._subscript_index))),
-      ']',
+    _paren_named_argument: $ => seq(
+      field('key', $.identifier),
+      ':',
+      field('value', $._expression),
     ),
 
     _parenthesized_command_link: $ => choice(
