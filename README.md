@@ -108,7 +108,7 @@ build.gradle:3:1: GradleRemovedApi: The project property `sourceCompatibility` w
 
 ```yaml
 - uses: actions/checkout@v5
-- uses: costajohnt/groovyfmt@v0.29.0      # runs groovyfmt --check --output-format github
+- uses: costajohnt/groovyfmt@v0.30.0      # runs groovyfmt --check --output-format github
 - run: groovyfmt --lint --output-format github
 ```
 
@@ -117,7 +117,7 @@ pre-commit:
 ```yaml
 repos:
   - repo: https://github.com/costajohnt/groovyfmt
-    rev: v0.29.0
+    rev: v0.30.0
     hooks:
       - id: groovyfmt        # or groovyfmt-check
       - id: groovyfmt-lint
