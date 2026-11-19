@@ -6,6 +6,10 @@
 
 - A Docker image, `ghcr.io/costajohnt/groovyfmt`, for linux/amd64 and linux/arm64, is published with each release, starting with 0.29.0: `docker run --rm -v "$PWD:/src" -w /src ghcr.io/costajohnt/groovyfmt --check`.
 
+### Changed
+
+- `--lint`, `--lint --fix` and the language server's diagnostics and code actions read and parse each Gradle wrapper file and each nearby `.gradle` script once while it stays the same on disk, not again for every build script that needs them. On a build of 400 subprojects under a 1 MB root `build.gradle`, `--lint` went from 20 s to 1.1 s and `--lint --fix --diff` from 101 s to 2.1 s; results are unchanged.
+
 ### Fixed
 
 - The language server's diagnostics now match `--lint`: with `gradle_compile_replacement` set, a `compile` dependency's GradleRemovedConfiguration message names the configured replacement, where the editor showed the generic message. The command line, `--lint --fix`, the editor's diagnostics and its code actions now share one lint pipeline, so they can't drift apart again.
