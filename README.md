@@ -56,7 +56,7 @@ docker run --rm -v "$PWD:/src" -w /src ghcr.io/costajohnt/groovyfmt --check
 
 Prebuilt binaries for Linux (static musl), macOS and Windows, each with a `.sha256`, are on every [release](https://github.com/costajohnt/groovyfmt/releases). See also [Windows](https://github.com/costajohnt/groovyfmt/blob/main/docs/windows.md).
 
-In a Gradle build, the [Gradle plugin](https://github.com/costajohnt/groovyfmt/tree/main/gradle-plugin) adds `groovyfmtCheck` and `groovyfmtLint` to `check`: `id 'io.github.costajohnt.groovyfmt' version '0.31.0'`.
+In a Gradle build, the [Gradle plugin](https://github.com/costajohnt/groovyfmt/tree/main/gradle-plugin) adds `groovyfmtCheck` and `groovyfmtLint` to `check`: `id 'io.github.costajohnt.groovyfmt' version '0.32.0'`.
 
 ## Usage
 
@@ -92,7 +92,7 @@ UnnecessaryGString = true
 
 ## Linting
 
-89 rules, 65 on by default (`groovyfmt --rules`).
+92 rules, 68 on by default (`groovyfmt --rules`).
 - General rules follow [CodeNarc](https://codenarc.org/) names. `groovyfmt --import-codenarc <config>` converts a CodeNarc or npm-groovy-lint config.
 - Jenkinsfile, Gradle and Spock rules catch mistakes that otherwise surface only when a build runs, such as Gradle 9 and Groovy 4 removals.
 - `// groovyfmt-ignore` or `@SuppressWarnings` suppress a report; `--write-baseline` lets you adopt lint gradually.
@@ -108,7 +108,7 @@ build.gradle:3:1: GradleRemovedApi: The project property `sourceCompatibility` w
 
 ```yaml
 - uses: actions/checkout@v5
-- uses: costajohnt/groovyfmt@v0.31.0      # runs groovyfmt --check --output-format github
+- uses: costajohnt/groovyfmt@v0.32.0      # runs groovyfmt --check --output-format github
 - run: groovyfmt --lint --output-format github
 ```
 
@@ -117,7 +117,7 @@ pre-commit:
 ```yaml
 repos:
   - repo: https://github.com/costajohnt/groovyfmt
-    rev: v0.31.0
+    rev: v0.32.0
     hooks:
       - id: groovyfmt        # or groovyfmt-check
       - id: groovyfmt-lint
