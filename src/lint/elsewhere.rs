@@ -45,6 +45,30 @@ pub struct Projects {
     cache: Mutex<HashMap<PathBuf, Arc<OnceLock<Index>>>>,
     /// Each project's classes, by simple name, with each declaration's superclass
     classes: Mutex<HashMap<PathBuf, Arc<OnceLock<Classes>>>>,
+    /// Each directory's Gradle wrapper version and `.gradle` scripts
+    gradle: super::gradle::Cache,
+}
+
+/// Whether the class of a name is a Spock spec (`Projects::spec_base`).
+type SpecBase<'a> = Box<dyn Fn(&str) -> Option<bool> + 'a>;
+
+/// What linting one file may look up beyond it: whether a superclass declared elsewhere
+/// is a Spock spec, and, through `Projects`, the cached Gradle wrapper and scripts around a
+/// build script.
+pub struct Context<'a> {
+    pub(super) spec_base: SpecBase<'a>,
+    pub(super) gradle: Option<&'a super::gradle::Cache>,
+}
+
+impl<'a> Context<'a> {
+    /// `spec_base` tells whether a superclass declared elsewhere is a Spock spec; the
+    /// Gradle rules read the files around a build script each time.
+    pub fn new(spec_base: impl Fn(&str) -> Option<bool> + 'a) -> Context<'a> {
+        Context {
+            spec_base: Box::new(spec_base),
+            gradle: None,
+        }
+    }
 }
 
 use super::spock::Classes;
@@ -75,6 +99,7 @@ impl Projects {
             fixed,
             cache: Mutex::default(),
             classes: Mutex::default(),
+            gradle: Default::default(),
         }
     }
 
@@ -85,6 +110,7 @@ impl Projects {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.gradle.clear();
     }
 
     /// For SpockUnassertedCondition and the other Spock rules (see `spock::class`): whether
@@ -93,9 +119,11 @@ impl Projects {
     /// spec, through any chain of the project's classes; `Some(false)` when every one ends
     /// at a class extending nothing; `None` (unknown) otherwise, as for a base from a
     /// library, two declarations that disagree, or no project.
-    pub fn spec_base<'a>(&'a self, path: &'a Path) -> impl Fn(&str) -> Option<bool> + 'a {
+    /// The Gradle rules read the wrapper and scripts around a build script through this
+    /// `Projects`, so each is read once while it stays the same on disk.
+    pub fn spec_base<'a>(&'a self, path: &'a Path) -> Context<'a> {
         let classes = OnceLock::new();
-        move |name: &str| {
+        let mut cx = Context::new(move |name: &str| {
             let classes = classes.get_or_init(|| {
                 let file =
                     config::normalize(&std::env::current_dir().unwrap_or_default().join(path));
@@ -105,7 +133,17 @@ impl Projects {
                 Some(cell)
             });
             super::spock::spec(classes.as_ref()?.get()?, name, &|_| None)
-        }
+        });
+        cx.gradle = Some(&self.gradle);
+        cx
+    }
+
+    /// For `fix::fix`, which checks its edits against every rule without the project's
+    /// Spock bases: this `Projects`' Gradle cache alone.
+    pub fn gradle_context(&self) -> Context<'_> {
+        let mut cx = Context::new(|_| None);
+        cx.gradle = Some(&self.gradle);
+        cx
     }
 
     /// Drop the UnusedPrivateMethod and UnusedPrivateField reports in `vs` (of `src`, the

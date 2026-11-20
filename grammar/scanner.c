@@ -47,6 +47,7 @@ enum TokenType {
     COMMAND_KEYWORD_ARGUMENT,
     DIMENSION_ANNOTATION_START,
     COMMAND_OPERAND,
+    PAREN_COMMAND_START,
     ERROR_SENTINEL,
 };
 
@@ -404,6 +405,134 @@ static bool skip_parens(TSLexer *lexer) {
     return false;
 }
 
+// What ends a gap that skip_paren_gap skips.
+enum ParenGap { GAP_END, GAP_SLASH, GAP_FAIL };
+
+// Skips a gap inside parentheses: whitespace, line breaks, `\` continuations and
+// comments, all of which Groovy 3 and 4 read like a space there. GAP_END at the
+// first other character or the end of input; GAP_SLASH past a `/` that starts
+// no comment, a division; GAP_FAIL at a stray `\`, an unclosed comment or the
+// end of the step budget.
+static enum ParenGap skip_paren_gap(TSLexer *lexer, unsigned *budget) {
+    for (;;) {
+        if (lexer->eof(lexer)) {
+            return GAP_END;
+        }
+        if (!skip_step(lexer, budget)) {
+            return GAP_FAIL;
+        }
+        int32_t g = lexer->lookahead;
+        if (is_whitespace(g)) {
+            lexer->advance(lexer, false);
+        } else if (g == '\\') {
+            lexer->advance(lexer, false);
+            if (lexer->lookahead == '\r') {
+                lexer->advance(lexer, false);
+            }
+            if (lexer->lookahead != '\n') {
+                return GAP_FAIL;
+            }
+        } else if (g == '/') {
+            lexer->advance(lexer, false);
+            if (lexer->lookahead == '/') {
+                while (lexer->lookahead != '\n') {
+                    if (lexer->eof(lexer)) {
+                        return GAP_END; // a comment that ends the input
+                    }
+                    if (!skip_step(lexer, budget)) {
+                        return GAP_FAIL;
+                    }
+                    lexer->advance(lexer, false);
+                }
+            } else if (lexer->lookahead == '*') {
+                lexer->advance(lexer, false);
+                int32_t prev = 0;
+                while (!(prev == '*' && lexer->lookahead == '/')) {
+                    if (!skip_step(lexer, budget)) {
+                        return GAP_FAIL;
+                    }
+                    prev = lexer->lookahead;
+                    lexer->advance(lexer, false);
+                }
+                lexer->advance(lexer, false);
+            } else {
+                return GAP_SLASH;
+            }
+        } else {
+            return GAP_END;
+        }
+    }
+}
+
+// `_paren_command_start`, with the lexer just past a parenthesized command's
+// first name: whether an index or a binary operator continues the name into an
+// expression argument. When `spaced`, the gap before the operator is skipped
+// first (skip_paren_gap): `(a b /* c */ - d)` and `(a b` then `- c`. `?.` and
+// `->` don't continue; neither does `=` in a parameter list (see below).
+// Neither do `.`, `?` and `<` right after the name, which the callers' other
+// branches read. A gap past the step budget is the default reading, false.
+static bool paren_argument_continues(TSLexer *lexer, bool spaced) {
+    unsigned budget = SKIP_BUDGET;
+    if (spaced) {
+        enum ParenGap gap = skip_paren_gap(lexer, &budget);
+        if (gap != GAP_END) {
+            return gap == GAP_SLASH;
+        }
+    }
+    int32_t c = lexer->lookahead;
+    if (c == '[' || c == '+' || c == '*' || c == '%' || c == '&' || c == '|' || c == '^'
+        || c == '>') {
+        return true;
+    }
+    if (spaced && c == '<') {
+        return true;
+    }
+    if (c == '-' || c == '=' || c == '!' || c == '/' || (spaced && c == '?')) {
+        lexer->advance(lexer, false);
+        int32_t n = lexer->lookahead;
+        switch (c) {
+            case '-': return n != '>';
+            case '=':
+                if (n == '=' || n == '~') {
+                    return true;
+                }
+                // `(a b = c)` is `a(b = c)`, unless the parentheses hold
+                // parameters with a default: a lambda's, `(String s = 'x') -> s`,
+                // or, in a script, the method's of `List<T> m(Map p = [:]) {`.
+                // A comment or a `\` continuation may come before the `{`.
+                if (!skip_parens(lexer)) {
+                    return false;
+                }
+                enum ParenGap gap = skip_paren_gap(lexer, &budget);
+                if (gap != GAP_END) {
+                    return gap == GAP_SLASH;
+                }
+                if (lexer->lookahead == '{') {
+                    return false;
+                }
+                if (lexer->lookahead == '-') {
+                    lexer->advance(lexer, false);
+                    return lexer->lookahead != '>';
+                }
+                char word[8];
+                unsigned len = read_word(lexer, word, sizeof(word));
+                return !(len == 6 && memcmp(word, "throws", 6) == 0);
+            case '!': return n == '=' || n == 'i';
+            case '/': return n != '/' && n != '*';
+            default: return n != '.';
+        }
+    }
+    // `(a b in l)` and `(a b as int)` are `a(b in l)` and `a(b as int)` in
+    // Groovy 3 and 4. Only whole words: `(a b inner)` is not an operator.
+    if (spaced && (c == 'i' || c == 'a')) {
+        char word[12];
+        unsigned len = read_word(lexer, word, sizeof(word));
+        return (len == 10 && memcmp(word, "instanceof", 10) == 0)
+            || (len == 2 && (memcmp(word, "in", 2) == 0 || memcmp(word, "as", 2) == 0));
+    }
+    return false;
+}
+
 // Advances past the rest of a `(…)` that holds only what a lambda's parameter
 // list can: names, whitespace, `,`, `.`, `<>`, `[]`, `?` and `@`. False at any
 // other character.
@@ -491,8 +620,10 @@ static bool skip_whitespace_and_continuations(TSLexer *lexer, bool *stray) {
 
 // At a `[`: true when a balanced `[…]` (brackets, braces and parentheses
 // nested; quoted strings skipped) is followed on its line by `:` but not `::`.
+// A call or property chain may come between: `a?[b].c():d`.
 static bool bracket_then_colon(TSLexer *lexer) {
     unsigned depth = 0;
+    bool chain = false;
     for (unsigned steps = 0; steps < 4000 && !lexer->eof(lexer); steps++) {
         int32_t c = lexer->lookahead;
         advance(lexer);
@@ -500,10 +631,37 @@ static bool bracket_then_colon(TSLexer *lexer) {
             depth++;
         } else if (c == ']' || c == ')' || c == '}') {
             if (--depth == 0) {
-                if (c != ']') {
+                if (c != ']' && !chain) {
                     return false;
                 }
-                while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                chain = true;
+                for (;;) {
+                    if (lexer->lookahead == '?' || lexer->lookahead == '*') {
+                        advance(lexer);
+                        if (lexer->lookahead != '.') {
+                            return false;
+                        }
+                    }
+                    if (lexer->lookahead != '.') {
+                        break;
+                    }
+                    advance(lexer);
+                    if (!is_ident_start(lexer->lookahead)) {
+                        return false;
+                    }
+                    while (is_ident_part(lexer->lookahead)) {
+                        advance(lexer);
+                    }
+                    // a closure argument: `.findAll { it }`
+                    while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                        advance(lexer);
+                    }
+                }
+                if (lexer->lookahead == '(' || lexer->lookahead == '[' || lexer->lookahead == '{') {
+                    continue;
+                }
+                // the `:` may start the next line: `c` then `?[x]` then `:y`
+                while (is_whitespace(lexer->lookahead)) {
                     advance(lexer);
                 }
                 if (lexer->lookahead != ':') {
@@ -1088,6 +1246,23 @@ bool tree_sitter_groovy_external_scanner_scan(
                 lexer->result_symbol = COMMAND_KEYWORD_ARGUMENT;
                 return true;
             }
+            // `if (a.b c[0] - n)`: in a parenthesized command, a name an index or a
+            // binary operator follows starts an expression argument (Groovy 3 and
+            // 4). Past spaces this decides: a key there, `(f a : 1)`, is left to
+            // the grammar, as is a name argument, `(a b)` or `(String s) ->`.
+            if (valid_symbols[PAREN_COMMAND_START] && is_name_argument(word, len)) {
+                int32_t n = lexer->lookahead;
+                bool spaced = n == ' ' || n == '\t' || n == '\\';
+                if (spaced || n == '[' || n == '+' || n == '-' || n == '*' || n == '%'
+                    || n == '&' || n == '|' || n == '^' || n == '>' || n == '=' || n == '!'
+                    || n == '/') {
+                    if (!paren_argument_continues(lexer, spaced)) {
+                        return false;
+                    }
+                    lexer->result_symbol = PAREN_COMMAND_START;
+                    return true;
+                }
+            }
             // `tag List<String>`: a generic type as the argument (Groovy 3
             // and 4), since a declared name takes no type arguments.
             if (lexer->lookahead == '<') {
@@ -1125,6 +1300,13 @@ bool tree_sitter_groovy_external_scanner_scan(
                         lexer->result_symbol = COMMAND_LITERAL_START;
                         return true;
                     }
+                    return false;
+                }
+                // `(a b?c:d)` and `(a l?[0] - c)`: a ternary, an elvis or a safe
+                // index continues a parenthesized command's argument.
+                if (valid_symbols[PAREN_COMMAND_START] && is_name_argument(word, len)) {
+                    lexer->result_symbol = PAREN_COMMAND_START;
+                    return true;
                 }
                 return false;
             }
@@ -1138,25 +1320,42 @@ bool tree_sitter_groovy_external_scanner_scan(
                 while (is_whitespace(lexer->lookahead)) {
                     advance(lexer);
                 }
-                // `x.url isSnapshot` then `? "a"` then `: "b"`, or then `?: 2`:
-                // a line can't start with `?`, so a ternary or elvis there
-                // continues the argument, as Groovy reads it.
-                if (lexer->lookahead == '?') {
-                    advance(lexer);
-                    if (lexer->lookahead != '.') {
-                        lexer->result_symbol = COMMAND_LITERAL_START;
+                // `(a b` then `- c` is `a(b - c)`: in parentheses the line
+                // break is a gap (see paren_argument_continues).
+                int32_t n = lexer->lookahead;
+                bool paren = valid_symbols[PAREN_COMMAND_START] && is_name_argument(word, len);
+                if (paren && n != '?' && n != '*' && n != '.') {
+                    // A miss has read past the operator, so only the name is left.
+                    if (paren_argument_continues(lexer, true)) {
+                        lexer->result_symbol = PAREN_COMMAND_START;
                         return true;
                     }
-                } else if (lexer->lookahead == '*') {
-                    advance(lexer);
-                }
-                if (lexer->lookahead == '.') {
-                    advance(lexer);
-                    // also `.@field` and `.&method`
-                    if (is_ident_start(lexer->lookahead) || lexer->lookahead == '@'
-                        || lexer->lookahead == '&') {
-                        lexer->result_symbol = COMMAND_LITERAL_START;
-                        return true;
+                } else {
+                    // `x.url isSnapshot` then `? "a"` then `: "b"`, or then `?: 2`:
+                    // a line can't start with `?`, so a ternary or elvis there
+                    // continues the argument, as Groovy reads it.
+                    if (n == '?') {
+                        advance(lexer);
+                        if (lexer->lookahead != '.') {
+                            lexer->result_symbol = COMMAND_LITERAL_START;
+                            return true;
+                        }
+                    } else if (n == '*') {
+                        advance(lexer);
+                        // `(a b` then `* c`
+                        if (paren && lexer->lookahead != '.') {
+                            lexer->result_symbol = PAREN_COMMAND_START;
+                            return true;
+                        }
+                    }
+                    if (lexer->lookahead == '.') {
+                        advance(lexer);
+                        // also `.@field` and `.&method`
+                        if (is_ident_start(lexer->lookahead) || lexer->lookahead == '@'
+                            || lexer->lookahead == '&') {
+                            lexer->result_symbol = COMMAND_LITERAL_START;
+                            return true;
+                        }
                     }
                 }
                 if (!valid_symbols[COMMAND_NAME_START] || !is_name_argument(word, len)) {
@@ -1196,6 +1395,7 @@ bool tree_sitter_groovy_external_scanner_scan(
             if (lexer->lookahead == ' ' || lexer->lookahead == '\t'
                 || (!valid_symbols[LINE_BREAK]
                     && (lexer->lookahead == '\n' || lexer->lookahead == '\r'))) {
+                newline |= lexer->lookahead == '\n' || lexer->lookahead == '\r';
                 lexer->advance(lexer, true);
             } else if (lexer->lookahead == '\\') {
                 lexer->advance(lexer, true);
@@ -1294,6 +1494,20 @@ bool tree_sitter_groovy_external_scanner_scan(
                 lexer->mark_end(lexer);
                 lexer->result_symbol = LINE_BREAK;
                 return true;
+            }
+            // `c` then `?[x]` then `:y`, the ternary of Groovy 2.4 and 3 over lines;
+            // no statement starts with `?`
+            if (lexer->lookahead == '?') {
+                if (!valid_symbols[TERNARY_QUESTION] || valid_symbols[EXPRESSION_COLON]) {
+                    return false;
+                }
+                advance(lexer);
+                lexer->mark_end(lexer);
+                if (lexer->lookahead == '[' && bracket_then_colon(lexer)) {
+                    lexer->result_symbol = TERNARY_QUESTION;
+                    return true;
+                }
+                return false;
             }
             if (is_ident_start(lexer->lookahead)) {
                 lexer->mark_end(lexer);
@@ -1621,6 +1835,31 @@ bool tree_sitter_groovy_external_scanner_scan(
         lexer->result_symbol = LINE_COMMENT;
         return true;
     }
+    // SPECIFICATION.md §5.10 — where no statement may end, inside `( … )` or
+    // `[ … ]`, a line break is whitespace, so a `[` or `(` on the next line
+    // still indexes or calls, as in Groovy 2.4, 3 and 4: `f(a.x` then `[0])`,
+    // `f(1, Math.max` then `(2, 3))`, `[ []` then `[1] ]` (`[][[1]]`).
+    if (newline && !stray && !valid_symbols[LINE_BREAK] && !valid_symbols[ERROR_SENTINEL]) {
+        if (lexer->lookahead == '[' && valid_symbols[SUBSCRIPT_OPEN]) {
+            advance(lexer);
+            lexer->mark_end(lexer);
+            // Not an empty `[]`, which would make an array type of a dotted name on
+            // the line before: a Spock row `a | X.Y` then `[] | b`.
+            while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+                advance(lexer);
+            }
+            if (lexer->lookahead == ']') {
+                return false;
+            }
+            lexer->result_symbol = SUBSCRIPT_OPEN;
+            return true;
+        }
+        if (lexer->lookahead == '(' && valid_symbols[CALL_OPEN]) {
+            advance(lexer);
+            lexer->result_symbol = CALL_OPEN;
+            return true;
+        }
+    }
     if (stray || lexer->lookahead != '/') {
         return false;
     }
@@ -1689,7 +1928,12 @@ bool tree_sitter_groovy_external_scanner_scan(
                 advance(lexer);
             }
         }
-        return false;
+        // No closer before end of input: Groovy rejects the file. Take the
+        // rest as one token no rule accepts, so it ends up in an ERROR. Returning
+        // false instead left each later `/*` to scan to the end again, which is
+        // quadratic in a file of unclosed comments (#278).
+        lexer->result_symbol = ERROR_SENTINEL;
+        return true;
     }
     if (!wants_slashy) {
         return false;
@@ -1753,6 +1997,7 @@ bool tree_sitter_groovy_external_scanner_scan(
     // not call `mark_end` again.
     lexer->mark_end(lexer);
     bool found_close = false;
+    bool crossed = false;
     while (!lexer->eof(lexer)) {
         // `\/` is an escaped slash; any other backslash is one character.
         // A backslash at the end of a line continues it: `/abc \` then ` x/`.
@@ -1771,9 +2016,24 @@ bool tree_sitter_groovy_external_scanner_scan(
             break;
         }
         if ((lexer->lookahead == '\n' || lexer->lookahead == '\r') && !lenient) {
-            break;
+            // At the start of a statement it may run over lines too, as Groovy
+            // 3 and 4 read it: `/ *` then ` * text` then `/`. Only when its `/`
+            // then ends the line, so `x = 4` then `/ 2` stays a division
+            // where a later line holds a `/`.
+            if (!line_start) {
+                break;
+            }
+            crossed = true;
         }
         advance(lexer);
+    }
+    if (found_close && crossed) {
+        advance(lexer);
+        while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+            advance(lexer);
+        }
+        found_close = lexer->eof(lexer) || lexer->lookahead == '\n' || lexer->lookahead == '\r'
+            || lexer->lookahead == ';';
     }
     if (!found_close) {
         return false;

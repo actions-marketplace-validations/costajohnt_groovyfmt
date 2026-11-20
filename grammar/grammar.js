@@ -184,6 +184,19 @@ function memberModifiers($) {
  * @param {GrammarSymbols<string>} $ Grammar reference symbols.
  * @returns {RuleOrLiteral[]} The modifiers, to spread into a `seq`.
  */
+// A closure after its `{`.
+function closureBody($) {
+  return [
+    optional(seq(optional($._line_break), $.closure_parameters)),
+    choice(
+      repeat(choice($._statement, ';', $._line_break)),
+      alias($._closure_command, $.command_chain),
+      alias($._closure_declaration, $.local_variable_declaration),
+    ),
+    '}',
+  ];
+}
+
 function defModifiers($) {
   return [
     repeat($._modifier),
@@ -358,6 +371,10 @@ module.exports = grammar({
     // §5.5 — the name an operator follows in a braceless if body's one command
     // argument, `if (c) o.f a - b` then `else` (see `_bare_operator_command`).
     $._command_operand,
+    // §5.5 — zero-width: in a parenthesized command, the first argument is a
+    // name an index or a binary operator follows on its line, which starts an
+    // expression: `if (a.b c[0] - n)`, `while (a.b c - 1)`.
+    $._paren_command_start,
     // Never referenced by a rule: valid only during error recovery, when
     // the scanner must not emit context-sensitive tokens.
     $._error_sentinel,
@@ -531,11 +548,14 @@ module.exports = grammar({
     // `{ File f = d() -> }`: a closure parameter's default call, or a declaration's
     // lambda command, `{ File f = d () -> 1 }`; prec.dynamic picks the parameter.
     [$._command_lambda_parameters, $._closure_default_arguments],
+    // `{ y = f(A b) -> }`: a lambda parameter's type, or a default call's command argument.
+    [$._type, $._argument_command],
 
     // §5.10 — after `{` and a `_line_break`, a closure's parameters or its
     // first statement may follow; in an enum, a constant or a member.
     [$.closure],
     [$.block, $.closure],
+    [$._new_closure_on_line],
     [$.enum_body],
     // §4 — in an enum, `E() {` starts a constant with a body or a
     // constructor; a `,` after the body makes it a constant.
@@ -805,6 +825,13 @@ module.exports = grammar({
       $.field_access,
       $.method_invocation,
       $.subscript_expression,
+      // `areEqualSets games*.name, [a]`, `foo q.@b, 1`, `foo a.&b, 1`, `foo a::b, 1`
+      $.spread_dot_expression,
+      $.direct_field_access_expression,
+      $.method_pointer_expression,
+      $.method_reference_expression,
+      $.safe_chain_dot_expression,
+      $.safe_subscript_expression,
       // `shouldFail foo + 'x', msg`, `assertTrue x instanceof Y, msg`,
       // `json.authors authors as Author[], { }`
       $.binary_expression,
@@ -923,7 +950,11 @@ module.exports = grammar({
     while_statement: $ => seq(
       'while',
       '(',
-      field('condition', $._expression),
+      // also a command call (Groovy 3 and 4): `while (a.b c)`
+      field('condition', choice(
+        $._expression,
+        alias($._parenthesized_command, $.command_chain),
+      )),
       ')',
       field('body', choice($.block, $._statement, ';')),
     ),
@@ -1298,7 +1329,8 @@ module.exports = grammar({
       repeat($.annotation),
       repeat($._modifier),
       field('return_type', $._type),
-      field('name', $.identifier),
+      // also a quoted name (Groovy 3 and 4): `String[] 'default'() default []`
+      field('name', choice($.identifier, alias($.string_literal, $.quoted_identifier))),
       field('parameters', alias($._empty_parameters, $.formal_parameters)),
       'default',
       field('default', choice(
@@ -1615,6 +1647,8 @@ module.exports = grammar({
       repeat(choice('public', 'protected', 'private', 'static')),
       alias($._record_keyword, 'record'),
       field('name', $.identifier),
+      // Groovy 4: `record Pair<A, B>(A a, B b)`
+      optional(field('type_parameters', $.type_parameters)),
       field('components', $.record_components),
       optional($.super_interfaces),
       optional(field('body', alias($._record_body, $.class_body))),
@@ -1724,7 +1758,8 @@ module.exports = grammar({
         optional('final'),
         field('type', choice($.generic_type, $.array_type)),
         alias($._bare_declarator, $.variable_declarator),
-        repeat(seq(',', alias($._bare_declarator, $.variable_declarator))),
+        // a later one may take a value: `List<String> a, b = null`
+        repeat(seq(',', $.variable_declarator)),
       )),
       // prec.dynamic: `String t = z` is one declaration, not `String` and
       // `t = z` (statements need no separator in this grammar).
@@ -1827,7 +1862,8 @@ module.exports = grammar({
       field('value', $._value),
     ),
 
-    _bare_declarator: $ => seq(field('name', $.identifier)),
+    // `in` too, after a type: `final InputStream in` (Groovy 3 and 4).
+    _bare_declarator: $ => seq(field('name', choice($.identifier, alias('in', $.identifier)))),
 
     variable_declarator: $ => seq(
       field('name', $.identifier),
@@ -2680,12 +2716,28 @@ module.exports = grammar({
         $._new_closure_start,
         field('closure', $.closure),
       )),
-      prec.left(PREC.POSTFIX, prec.dynamic(-1000, seq(
+      prec.left(PREC.POSTFIX, seq(
         field('function', $.object_creation_expression),
-        $._command_closure_start,
-        field('closure', $.closure),
-      ))),
+        field('closure', alias($._new_closure_on_line, $.closure)),
+      )),
     ),
+
+    // The closure reading of `new X() {` on its line loses to the class body
+    // where both parse. Its weight sits on the `{`, reduced first, not on the
+    // whole call: tree-sitter keeps at most six parse versions and drops the
+    // lowest weighted. With the weight only at the end, each declaration in
+    // the closure's body (+1) outweighed the class body's members, and a body
+    // like `int r = 1`, `String c = (String) 's'`, `def f() { c }` lost its
+    // class body reading to the version cap.
+    _new_closure_on_line: $ => seq(
+      $._new_closure_open,
+      ...closureBody($),
+    ),
+
+    // -32000, near the 16-bit limit of a dynamic precedence: a class body flips to the
+    // closure reading only past about 32,000 members (31,000 stay a class body, 33,000
+    // flip). At -1000 it flipped at about 1,000.
+    _new_closure_open: $ => prec.dynamic(-32000, seq($._command_closure_start, '{')),
 
     // §3.2 / §5.11 — argument list. Positional args are `_expression`;
     // named args (Groovy's `k: v` in call position) are `map_entry`
@@ -2800,7 +2852,8 @@ module.exports = grammar({
     // `x[]` stays an array type. A string takes one too: `"x"[]` is
     // `"x"[[]]`.
     _empty_list_subscript: $ => seq(
-      field('object', choice($.list_literal, $.string_literal)),
+      // and a null or a number: `null[]`, `1[]` (they throw at run time)
+      field('object', choice($.list_literal, $.string_literal, $.null_literal, $.number_literal)),
       alias($._subscript_open, '['),
       ']',
     ),
@@ -2972,16 +3025,7 @@ module.exports = grammar({
     // it on its line, is read as that call, as Groovy reads it and as for a
     // lambda's body: `{ x -> println x }`, `{ println it }`. Elsewhere
     // `foo bar` stays two statements (see command_chain).
-    closure: $ => seq(
-      '{',
-      optional(seq(optional($._line_break), $.closure_parameters)),
-      choice(
-        repeat(choice($._statement, ';', $._line_break)),
-        alias($._closure_command, $.command_chain),
-        alias($._closure_declaration, $.local_variable_declaration),
-      ),
-      '}',
-    ),
+    closure: $ => seq('{', ...closureBody($)),
 
     _closure_command: $ => seq(
       field('receiver', choice(
@@ -3002,9 +3046,13 @@ module.exports = grammar({
       alias($._bare_declarator, $.variable_declarator),
     ),
 
+    // prec.dynamic: each parameter before a `,` outweighs a declaration and a
+    // lambda, `{ Map<K, V> m, int n -> }` not `Map<K, V> m, int` and `n -> `,
+    // as Groovy 2.4, 3 and 4 read it. 2, not 1: a default value costs its
+    // parameter 1, and the declaration's reading has defaults only before a `,`.
     closure_parameters: $ => seq(
       optional(seq(
-        repeat(seq($.closure_parameter, ',')),
+        repeat(prec.dynamic(2, seq($.closure_parameter, ','))),
         choice(
           $.closure_parameter,
           alias($._closure_parameter_name_default, $.closure_parameter),
@@ -3077,10 +3125,11 @@ module.exports = grammar({
       field('arguments', alias($._closure_default_arguments, $.argument_list)),
     )),
 
-    // ponytail: empty parentheses only, the form seen in real files; `d(x) ->` would need
-    // the arguments to share a conflict with a lambda's parameters.
+    // The arguments may be any an argument list takes, `{ y = f(1, 2) -> y }`; where they
+    // could also be a lambda's parameters, `{ y = f(a) -> y }`, prec.dynamic picks the call.
     _closure_default_arguments: $ => seq(
       alias($._command_lambda_open, '('),
+      optional($._argument_list_body),
       ')',
     ),
 
@@ -3216,7 +3265,13 @@ module.exports = grammar({
               $._expression,
               alias($._command_quoted_named_argument, $.named_argument),
             ))),
+            // `if (a.b c[0] - n)` is `a.b(c[0] - n)`: a name an index or a binary
+            // operator follows (see `_paren_command_start`)
+            seq($._paren_command_start, field('argument', $._expression)),
             field('argument', alias($._command_named_argument, $.named_argument)),
+            // `(f a : 1)`: a key a space keeps from its `:`, which the scanner
+            // leaves to the grammar after looking past the space
+            field('argument', alias($._paren_named_argument, $.named_argument)),
             field('argument', $.identifier),
             // `if (valueOf findProperty(s, 'x'))`
             field('argument', alias($._name_call, $.method_invocation)),
@@ -3241,6 +3296,12 @@ module.exports = grammar({
       ),
       // also a quoted one: `("a" 1 "b")` is `a(1).b`
       optional(choice($.identifier, $.string_literal)),
+    ),
+
+    _paren_named_argument: $ => seq(
+      field('key', $.identifier),
+      ':',
+      field('value', $._expression),
     ),
 
     _parenthesized_command_link: $ => choice(
@@ -3444,12 +3505,14 @@ module.exports = grammar({
     _dollar_slashy_string: $ => seq(
       '$/',
       repeat(gstringPart($, $._dollar_slashy_text)),
-      token.immediate('/$'),
+      // A `/` before the `/$` is text: `$/a//$` is `a/`. The text can't hold
+      // that `/` without lookahead, so the closer takes the run of slashes.
+      alias(token.immediate(/\/+\$/), '/$'),
     ),
 
     _dollar_slashy_text: _ => token.immediate(repeat1(choice(
       /[^/$]/,
-      /\/[^$]/,
+      /\/+[^/$]/,
       /\$\$/,
       /\$\//,
     ))),

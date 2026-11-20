@@ -1,14 +1,77 @@
 # Changelog
 
-## Unreleased
+## 0.30.5 (2026-11-20)
+
+### Fixed
+
+- A closure parameter whose default is a call with arguments now parses, as Groovy 2.4, 3 and 4 read it: `{ y = f(1, 2) -> y }`, `{ x, y = helper(1, 2) -> x }`. Only empty parentheses parsed before, and `{ y = f(a) -> y }` was read as a closure body passing a lambda `(a) -> y` to `f`. ([#287](https://github.com/costajohnt/groovyfmt/issues/287))
+- Jenkins lint rules no longer report these forms, which the Declarative Pipeline validator accepts: a bare-word axis name, `name compiler` (JenkinsMatrixAxes); a parenthesized literal or a negative number in an environment concatenation, `C = ('a') + "${A}"`, `Y = 'y' + -3`, and a declaration of several variables, `def A = 'a', B = 'b'` (JenkinsEnvironmentEntry); a parenthesized stage name, `stage(('S'))` (JenkinsStageName); and `this.`-qualified sections and steps, `this.agent any`, `this.stage('Build') { }` (JenkinsMissingSection, JenkinsUnknownSection, JenkinsStatementOutsideSection). ([#287](https://github.com/costajohnt/groovyfmt/issues/287))
+- A directory walk leaves out a `Jenkinsfile.*`-style name that holds a Dockerfile, one whose first line past blank lines and `#` comments starts with `FROM ` or `ARG ` (`Dockerfile.jenkins`), and a FreeMarker template, by its `.ftl` suffix or a `<#` tag on a line that doesn't parse. `--syntax .` reported them as unparseable. ([#287](https://github.com/costajohnt/groovyfmt/issues/287))
+
+## 0.30.4 (2026-11-20)
+
+### Fixed
+
+- A closure whose first parameter has a generic or array type or a default, followed by more parameters, now parses as a closure with those parameters, as Groovy 2.4, 3 and 4 read it: `{ Map<String, Integer> m, int n -> m }` and `{ String m = 'x', int n -> m }`. They were read as a declaration `Map<String, Integer> m, int` and a lambda `n -> m`, so lint rules saw the wrong tree, and a parameter list over several lines indented its closure's body as a lambda's. ([#283](https://github.com/costajohnt/groovyfmt/issues/283))
+- An anonymous class body with more than about 1,000 field declarations stays a class body. It used to be read as a closure, which failed with "a method can't be declared in a closure or block". The limit is now about 32,000. ([#283](https://github.com/costajohnt/groovyfmt/issues/283))
+
+## 0.30.3 (2026-11-20)
+
+### Fixed
+
+- A file with many unclosed `/*` block comments now fails to parse in linear time. Each unclosed `/*` used to scan to the end of the file, so 4,000 of them took over 20 times as long as 1,000. The first unclosed `/*` now takes the rest of the file as one error, reported as `unexpected /*…` at that comment. ([#278](https://github.com/costajohnt/groovyfmt/issues/278))
+- A generic record, `record MapTransform<T>(Class<T> type, Closure<?> transformer) {}`, now parses, as in Groovy 4. ([#281](https://github.com/costajohnt/groovyfmt/issues/281))
+- An anonymous class body stays a class body when it holds an initialized field, then a field initialized with a cast, then a method, one per line: `new Object() {` then `int r = 1`, `String c = (String) 's'` and `def f() { c }`. It used to be read as a closure, which failed with "a method can't be declared in a closure or block". ([#281](https://github.com/costajohnt/groovyfmt/issues/281))
+
+## 0.30.2 (2026-11-20)
+
+### Changed
+
+- The Gradle plugin declares configuration cache compatibility on the Gradle Plugin Portal. It already worked with the configuration cache; its tests run with `--configuration-cache`.
+
+### Fixed
+
+- Five more parenthesized command call forms that Groovy 3 and 4 accept now parse: `(a b = c)` (`a(b = c)`), an unspaced ternary or elvis `(a b?c:d)`, a safe index with an operator `(a l?[0] - c)`, and a comment, a line break or a backslash continuation before the operator, `(a b /* c */ - d)` and `(a b` then `- c)`. A lambda whose parameter has a default, `(String s = 'x') -> s`, stays a lambda. ([#261](https://github.com/costajohnt/groovyfmt/issues/261))
+- Two hard links to one file in the same run are now one file: it is formatted, checked and linted once, under the first name in walk order, where both names went to different workers at once and one of them could fail with "file changed while formatting". This is unix only; on Windows std can't yet tell hard links apart. ([#272](https://github.com/costajohnt/groovyfmt/issues/272))
+
+## 0.30.1 (2026-11-19)
+
+### Added
+
+- The Gradle plugin has a README, `gradle-plugin/README.md`, with its `plugins { }` line, tasks and options, and it is the plugin's website on the Gradle Plugin Portal.
+
+### Fixed
+
+- `in` and `as` in a parenthesized command call's argument now parse the way Groovy 3 and 4 read them: `(a b in l)` is `a(b in l)` and `if (a b as int)` is `a(b as int)`, where groovyfmt read `a(b).in(l)` and `a(b).as(int)`. Formatting output was unaffected, but lint rules saw the wrong tree. ([#261](https://github.com/costajohnt/groovyfmt/issues/261))
+
+## 0.30.0 (2026-11-19)
 
 ### Added
 
 - A Docker image, `ghcr.io/costajohnt/groovyfmt`, for linux/amd64 and linux/arm64, is published with each release, starting with 0.29.0: `docker run --rm -v "$PWD:/src" -w /src ghcr.io/costajohnt/groovyfmt --check`.
 
+### Changed
+
+- `--lint`, `--lint --fix` and the language server's diagnostics and code actions read and parse each Gradle wrapper file and each nearby `.gradle` script once while it stays the same on disk, not again for every build script that needs them. On a build of 400 subprojects under a 1 MB root `build.gradle`, `--lint` went from 20 s to 1.1 s and `--lint --fix --diff` from 101 s to 2.1 s; results are unchanged.
+
 ### Fixed
 
 - The language server's diagnostics now match `--lint`: with `gradle_compile_replacement` set, a `compile` dependency's GradleRemovedConfiguration message names the configured replacement, where the editor showed the generic message. The command line, `--lint --fix`, the editor's diagnostics and its code actions now share one lint pipeline, so they can't drift apart again.
+- Ten forms of valid Groovy that failed to parse, so the whole file was skipped, now parse ([#256](https://github.com/costajohnt/groovyfmt/issues/256)):
+  - a command call whose first argument is a spread, attribute, method pointer or method reference path followed by a comma: `areEqualSets games*.name, [a, b]`, `foo q.@b, 1`, `foo a.&b, 1`, `foo a::b, 1`;
+  - a dollar-slashy string ending in a slash: `$/a//$` (the value `a/`);
+  - the Groovy 2.4 and 3 ternary whose first branch is a list with a call or property after it, `a?[b].c():d` (Groovy 4 code reads `?[` as a safe index as before);
+  - a generic or array typed declaration with a value on a later name: `List<String> a, b = null`;
+  - a command call with one plain or subscripted argument as an `if` or `while` condition: `if (a.b c[0])`, `while (a.b c)`;
+  - `in` as a local variable's name: `final InputStream in` then `in = x`;
+  - an empty index on `null` or a number: `return null[]`;
+  - a quoted annotation member name with a default: `String[] 'default'() default []`;
+  - a line break before `[` or `(` inside parentheses or brackets, which Groovy reads as an index or call: `f(a.x` then `[0])`, `[ []` then `[1], ]` (`[][[1]]`);
+  - a slashy string over several lines at the start of a statement, `/ *` then ` * text` then `/`, when its closing `/` ends the line.
+- A command call in parentheses, such as an `if` or `while` condition, now parses with any expression as its first argument, not only a name, call or subscript: `if (a.b c[0] - n)`, `if (a.b c[0].x)`, `while (a.b c - 1)` (Groovy 3 and 4). ([#256](https://github.com/costajohnt/groovyfmt/issues/256))
+- GradleLeftShiftTask is quiet when the nearest Gradle wrapper pins a version below 5.0, which still has `task name << { }`, as GradleRemovedConfiguration is below 7.0; with no wrapper it still reports (gradle-liquibase-plugin under a 2.2 wrapper, springfox under 4.6). ([#256](https://github.com/costajohnt/groovyfmt/issues/256))
+- UnusedPrivateMethod no longer reports a private operator method whose operator the class uses: `private void leftShift(x)` called as `this << x`, `plus` through `+` (mcolletta/mircomp's `FactorOracle.groovy`). ([#256](https://github.com/costajohnt/groovyfmt/issues/256))
+- SpockBlockOrder and the other Spock rules no longer treat a class with JUnit `@Test` methods as a spec because its file imports from Spock and its base class is declared elsewhere (Gradle's `EclipseClasspathIntegrationTest`). ([#256](https://github.com/costajohnt/groovyfmt/issues/256))
 
 ## 0.29.0 (2026-11-18)
 

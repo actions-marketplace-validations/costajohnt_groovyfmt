@@ -14,11 +14,168 @@
 //! (`vars/*.groovy`): directly in its body, after any other statements, or in an `if` branch.
 //! Scripted pipelines (`node { }`) are never checked.
 
-use super::{Violation, at, constant_value, has_interpolation};
+use super::{Rule, Violation, at, constant_value, has_interpolation, unparen};
 use crate::text;
 use std::collections::HashSet;
 use std::path::Path;
 use tree_sitter::Node;
+
+pub(super) const RULES: &[Rule] = &[
+    // Declarative Jenkins pipelines (src/lint/jenkins.rs)
+    Rule {
+        name: "JenkinsMissingSection",
+        default: true,
+        description: "pipeline without agent or stages, stages without a stage, a stage with none of steps, stages, parallel, matrix",
+        why: "A declarative pipeline needs `agent` and `stages`, each `stages` needs a stage, and each stage needs `steps`, `stages`, `parallel` or `matrix`; Jenkins rejects the file when the build starts, after the push.",
+        bad: "pipeline {\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsConflictingSections",
+        default: true,
+        description: "a section twice in one block, or a stage with more than one of steps, stages, parallel, matrix",
+        why: "Jenkins rejects a section given twice in one block, and a stage with more than one of `steps`, `stages`, `parallel` and `matrix`, when the build starts.",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n            steps {\n                sh 'make test'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n                sh 'make test'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsUnknownSection",
+        default: true,
+        description: "a section that doesn't belong where it is in pipeline, stage, matrix, post or stages",
+        why: "A section in the wrong place (`steps` directly in `pipeline`, `parameters` in a stage) or a misspelled one fails validation when the build starts.",
+        bad: "pipeline {\n    agent any\n    steps {\n        sh 'make'\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsStatementOutsideSection",
+        default: true,
+        description: "Groovy code directly in pipeline, stages, stage, matrix, post or when instead of in steps",
+        why: "Declarative pipelines only allow sections where Groovy code would otherwise go; code belongs in `steps` (inside `script { }` when it isn't a step) or in `environment`.",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            def target = 'all'\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsScriptRequired",
+        default: true,
+        description: "if, for, while, try, switch, def or an assignment directly in steps without script { }",
+        why: "`steps` takes steps only: `if`, loops, `try`, `def` and assignments must be wrapped in `script { }`, or the build fails to start.",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            steps {\n                if (env.BRANCH_NAME == 'main') {\n                    sh 'make deploy'\n                }\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            steps {\n                script {\n                    if (env.BRANCH_NAME == 'main') {\n                        sh 'make deploy'\n                    }\n                }\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsUnknownWhenCondition",
+        default: true,
+        description: "a when condition that isn't built in",
+        why: "A `when` condition that isn't built in (a typo such as `branchName`) fails validation when the build starts.",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            when {\n                branchName 'main'\n            }\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            when {\n                branch 'main'\n            }\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsMisplacedOption",
+        default: true,
+        description: "parameters or triggers in options, or a pipeline-wide option in a stage's options",
+        why: "`parameters` and `triggers` are sections of their own, not options, and some options apply only to the whole pipeline; Jenkins rejects them in the wrong place.",
+        bad: "pipeline {\n    agent any\n    options {\n        triggers {\n            cron('H 2 * * *')\n        }\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    triggers {\n        cron('H 2 * * *')\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsDuplicateStageName",
+        default: true,
+        description: "two stages with the same name in one stages or parallel block",
+        why: "Stage names must be unique within their block; Jenkins rejects duplicates, and the stage view can't tell them apart.",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n        stage('Build') {\n            steps {\n                sh 'make test'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n        stage('Test') {\n            steps {\n                sh 'make test'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsStageName",
+        default: true,
+        description: "a stage with no name, or a name that isn't a plain string",
+        why: "A declarative stage needs a name that is a plain string; an interpolated name (`\"Deploy ${env}\"`) is rejected.",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage(\"Deploy ${params.TARGET}\") {\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            steps {\n                sh \"make deploy TARGET=${params.TARGET}\"\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsAgentForm",
+        default: true,
+        description: "agent with no value, an empty or multi-type block, or a bare type other than any and none",
+        why: "`agent` takes `any`, `none` or a block naming one agent type; anything else fails validation when the build starts.",
+        bad: "pipeline {\n    agent docker\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent {\n        docker {\n            image 'gcc:13'\n        }\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsParallelNesting",
+        default: true,
+        description: "parallel or matrix inside a stage that is already inside parallel or matrix, or agent or tools on a stage holding parallel or matrix",
+        why: "Jenkins runs one level of parallel stages: a parallel or matrix inside another one is rejected, and so are agent and tools on the stage that holds them, since that stage runs nothing itself. Source: the Declarative Pipeline validator (ModelValidatorImpl, messages NoNestedWithinNestedStages, AgentInNestedStages, ToolsInNestedStages).",
+        bad: "pipeline {\n    agent none\n    stages {\n        stage('Test') {\n            agent any\n            parallel {\n                stage('Unit') {\n                    steps {\n                        sh 'make test'\n                    }\n                }\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent none\n    stages {\n        stage('Test') {\n            parallel {\n                stage('Unit') {\n                    agent any\n                    steps {\n                        sh 'make test'\n                    }\n                }\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsWhenNesting",
+        default: true,
+        description: "allOf or anyOf with no condition, not without exactly one, arguments to them, or a block of conditions under another condition",
+        why: "Only allOf, anyOf and not nest conditions: allOf and anyOf need at least one, not exactly one, and none of them takes arguments. Any other condition given a block is rejected when the build starts. Source: the Declarative Pipeline validator (ModelValidatorImpl, messages NestedWhenWithoutChildren, NestedWhenWrongChildrenCount, NestedWhenNoArgs, NoNestedWhenAllowed).",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            when {\n                not {\n                    branch 'dev'\n                    branch 'test'\n                }\n            }\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            when {\n                not {\n                    anyOf {\n                        branch 'dev'\n                        branch 'test'\n                    }\n                }\n            }\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsMatrixAxes",
+        default: true,
+        description: "a matrix without axes, an axis without a valid name or values, a repeated axis name or value, an empty excludes or exclude",
+        why: "A matrix needs `axes`, each axis a `name` that is a valid variable name and `values` that are plain strings, with no name or value given twice; `excludes` and each `exclude` must not be empty, and an exclude axis takes `values` or `notValues`, not both. Jenkins rejects anything else when the build starts. Source: the Declarative Pipeline parser and validator (ModelParser, ModelValidatorImpl, messages RequiredSection, NoAxes, DuplicateAxisName, DuplicateAxisValue, NoExcludes, MatrixExcludeAxisValuesOrNotValues).",
+        bad: "pipeline {\n    agent none\n    stages {\n        stage('Test') {\n            matrix {\n                axes {\n                    axis {\n                        name 'OS'\n                        values 'linux', 'mac', 'linux'\n                    }\n                }\n                stages {\n                    stage('Unit') {\n                        steps {\n                            sh 'make test'\n                        }\n                    }\n                }\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent none\n    stages {\n        stage('Test') {\n            matrix {\n                axes {\n                    axis {\n                        name 'OS'\n                        values 'linux', 'mac'\n                    }\n                }\n                stages {\n                    stage('Unit') {\n                        steps {\n                            sh 'make test'\n                        }\n                    }\n                }\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsInputSection",
+        default: true,
+        description: "a stage input without message, with a field other than message, id, ok, submitter, submitterParameter, parameters, or a field twice",
+        why: "A stage's `input` needs a `message`, takes only the fields message, id, ok, submitter, submitterParameter and parameters, each once with one value; Jenkins rejects anything else when the build starts. Source: the Declarative Pipeline parser and validator (ModelParser.parseInput, messages InvalidInputField, MultipleOfSection, MissingInputMessage).",
+        bad: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            input {\n                text 'Deploy to production?'\n            }\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    stages {\n        stage('Deploy') {\n            input {\n                message 'Deploy to production?'\n            }\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsEnvironmentEntry",
+        default: true,
+        description: "an environment line that isn't KEY = value, a key that isn't a valid name or is set twice, or a value that isn't a string, literal or method call",
+        why: "`environment` takes only `KEY = value` lines with unique keys made of letters, digits and `_`. A value must be a quoted string, a literal, a method call such as credentials('id'), or quoted strings joined with `+`; a bare `env.X` or `params.X` is rejected when the build starts (write \"${params.X}\"). Source: the Declarative Pipeline parser and validator (ModelParser.parseEnvironment, messages InvalidEnvironmentValue, InvalidEnvironmentConcatValue, InvalidEnvironmentOperation, DuplicateEnvVar, InvalidIdentifierInEnv).",
+        bad: "pipeline {\n    agent any\n    environment {\n        TARGET = params.TARGET\n    }\n    stages {\n        stage('Deploy') {\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    environment {\n        TARGET = \"${params.TARGET}\"\n    }\n    stages {\n        stage('Deploy') {\n            steps {\n                sh 'make deploy'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsDuplicateOption",
+        default: true,
+        description: "the same option or trigger twice in one options or triggers block",
+        why: "An option or trigger given twice in one block is rejected when the build starts, so the second one never silently wins. Source: the Declarative Pipeline validator (ModelValidatorImpl, messages DuplicateOptionName, DuplicateTriggerName).",
+        bad: "pipeline {\n    agent any\n    options {\n        timeout(time: 1, unit: 'HOURS')\n        timeout(time: 2, unit: 'HOURS')\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    options {\n        timeout(time: 2, unit: 'HOURS')\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'make'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "JenkinsToolVersion",
+        default: true,
+        description: "a tools entry that isn't a tool type with exactly one installation name",
+        why: "Each line of `tools` names a tool type and one installation, as in maven 'maven-3.9'; a bare type or a second argument is rejected when the build starts. Source: the Declarative Pipeline parser (ModelParser.parseTools, messages ExpectedTool, NoArgForTool, TooManyArgsForTool).",
+        bad: "pipeline {\n    agent any\n    tools {\n        maven\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'mvn package'\n            }\n        }\n    }\n}",
+        good: "pipeline {\n    agent any\n    tools {\n        maven 'maven-3.9'\n    }\n    stages {\n        stage('Build') {\n            steps {\n                sh 'mvn package'\n            }\n        }\n    }\n}",
+        fixable: false,
+    },
+];
 
 const PIPELINE: &[&str] = &[
     "agent",
@@ -128,7 +285,8 @@ pub(super) fn call<'a>(n: Node<'a>, src: &'a str) -> Option<Call<'a>> {
         "command_chain" => {
             let mut c = n.walk();
             args.extend(n.children_by_field_name("argument", &mut c));
-            n.child_by_field_name("receiver")?
+            let r = n.child_by_field_name("receiver")?;
+            this_qualified(r, src).unwrap_or(r)
         }
         "expression_statement" => {
             let e = n.named_child(0)?;
@@ -145,9 +303,11 @@ pub(super) fn call<'a>(n: Node<'a>, src: &'a str) -> Option<Call<'a>> {
                 }
                 "method_invocation" => {
                     let f = e.child_by_field_name("function")?;
-                    if f.kind() != "identifier" {
-                        return None;
-                    }
+                    let f = if f.kind() == "identifier" {
+                        f
+                    } else {
+                        this_qualified(f, src)?
+                    };
                     if let Some(a) = e.child_by_field_name("arguments") {
                         let mut c = a.walk();
                         args.extend(
@@ -174,6 +334,16 @@ pub(super) fn call<'a>(n: Node<'a>, src: &'a str) -> Option<Call<'a>> {
         args,
         body,
     })
+}
+
+/// `name` in `this.name`, which is the same call as `name` (`this.agent any`, `this.steps { }`).
+fn this_qualified<'a>(n: Node<'a>, src: &str) -> Option<Node<'a>> {
+    (n.kind() == "field_access"
+        && n.child_by_field_name("object")
+            .is_some_and(|o| text(o, src) == "this"))
+    .then(|| n.child_by_field_name("field"))
+    .flatten()
+    .filter(|f| f.kind() == "identifier")
 }
 
 /// The grammar reads a command whose argument is an identifier or a method call, `agent any`
@@ -521,7 +691,7 @@ fn stage(
     depth: usize,
     v: &mut Vec<Violation>,
 ) -> Option<String> {
-    let name = match c.args.first() {
+    let name = match c.args.first().map(|&a| unparen(a)) {
         None => {
             v.push(at(
                 c.node,
@@ -530,13 +700,13 @@ fn stage(
             ));
             None
         }
-        Some(&a)
+        Some(a)
             if (a.kind() == "string_literal" && !has_interpolation(a))
                 || a.kind() == "identifier" =>
         {
             constant_value(a, src)
         }
-        Some(&a) => {
+        Some(a) => {
             v.push(at(
                 a,
                 "JenkinsStageName",
@@ -863,7 +1033,8 @@ fn env_identifier(s: &str) -> bool {
 /// is a literal, a string, a method call, or literals and strings joined with `+`
 /// (ModelParser.parseEnvironment). A declaration of one variable with a value, `def KEY =
 /// value` or `String KEY = value`, is one too: it is a DeclarationExpression, which is a
-/// BinaryExpression with `=`, and ModelParser reads its variable as the key (#222).
+/// BinaryExpression with `=`, and ModelParser reads its variable as the key (#222). One of
+/// several variables, `def A = 'a', B = 'b'`, is a declaration each (#287).
 fn environment(src: &str, body: Node, v: &mut Vec<Violation>) {
     let mut seen = HashSet::new();
     for s in statements(body) {
@@ -874,73 +1045,80 @@ fn environment(src: &str, body: Node, v: &mut Vec<Violation>) {
                 a.child_by_field_name("operator")
                     .is_some_and(|o| o.kind() == "=")
             });
-        // `def x = 1` holds its name and value, or one `variable_declarator` that does
-        let d = (s.kind() == "local_variable_declaration")
-            .then(|| {
-                let mut c = s.walk();
-                let ds: Vec<_> = s
-                    .named_children(&mut c)
-                    .filter(|d| d.kind() == "variable_declarator")
-                    .collect();
-                match ds[..] {
-                    [] => Some(s),
-                    [d] => Some(d),
-                    _ => None,
-                }
-            })
-            .flatten();
-        let (Some(key), Some(value)) = (
-            a.and_then(|a| a.child_by_field_name("left"))
-                .or_else(|| d.and_then(|d| d.child_by_field_name("name"))),
-            a.and_then(|a| a.child_by_field_name("right"))
-                .or_else(|| d.and_then(|d| d.child_by_field_name("value"))),
-        ) else {
-            v.push(at(
-                s,
-                "JenkinsEnvironmentEntry",
-                format!(
-                    "`{}` is not an environment entry; environment {{ }} takes only KEY = value lines",
-                    head(s, src)
-                ),
-            ));
-            continue;
-        };
-        let k = text(key, src);
-        let msg = if key.kind() != "identifier" || !env_identifier(k) {
-            format!(
-                "`{k}` is not a valid environment variable name; use letters, digits and _, not starting with a digit"
-            )
-        } else if !seen.insert(k) {
-            format!("`{k}` is set twice in this environment {{ }}; Jenkins rejects a repeat")
-        } else if !env_value(value) {
-            format!(
-                "The value of `{k}` must be a quoted string, a literal or a method call (`{}` is none of these); write \"${{...}}\" to use an expression",
-                head(value, src)
-            )
+        // `def x = 1` holds its name and value, or `variable_declarator`s that do; Groovy reads
+        // `def A = 'a', B = 'b'` as two declarations
+        let ds: Vec<Node> = if s.kind() == "local_variable_declaration" {
+            let mut c = s.walk();
+            let ds: Vec<_> = s
+                .named_children(&mut c)
+                .filter(|d| d.kind() == "variable_declarator")
+                .collect();
+            if ds.is_empty() { vec![s] } else { ds }
         } else {
-            continue;
+            vec![]
         };
-        v.push(at(s, "JenkinsEnvironmentEntry", msg));
+        let entries: Vec<(Option<Node>, Option<Node>)> = match a {
+            Some(a) => vec![(
+                a.child_by_field_name("left"),
+                a.child_by_field_name("right"),
+            )],
+            None if ds.is_empty() => vec![(None, None)],
+            None => ds
+                .iter()
+                .map(|d| {
+                    (
+                        d.child_by_field_name("name"),
+                        d.child_by_field_name("value"),
+                    )
+                })
+                .collect(),
+        };
+        for entry in entries {
+            let (Some(key), Some(value)) = entry else {
+                v.push(at(
+                    s,
+                    "JenkinsEnvironmentEntry",
+                    format!(
+                        "`{}` is not an environment entry; environment {{ }} takes only KEY = value lines",
+                        head(s, src)
+                    ),
+                ));
+                continue;
+            };
+            let k = text(key, src);
+            let msg = if key.kind() != "identifier" || !env_identifier(k) {
+                format!(
+                    "`{k}` is not a valid environment variable name; use letters, digits and _, not starting with a digit"
+                )
+            } else if !seen.insert(k) {
+                format!("`{k}` is set twice in this environment {{ }}; Jenkins rejects a repeat")
+            } else if !env_value(value, src) {
+                format!(
+                    "The value of `{k}` must be a quoted string, a literal or a method call (`{}` is none of these); write \"${{...}}\" to use an expression",
+                    head(value, src)
+                )
+            } else {
+                continue;
+            };
+            v.push(at(s, "JenkinsEnvironmentEntry", msg));
+        }
     }
 }
 
-fn env_value(n: Node) -> bool {
+fn env_value(n: Node, src: &str) -> bool {
     match n.kind() {
         "string_literal" | "number_literal" | "boolean_literal" | "null_literal"
         | "method_invocation" | "command_chain" => true,
         // `-1`: whether Groovy reads it as a constant isn't certain, so it is let through
         "unary_expression" => true,
-        "parenthesized_expression" => n.named_child(0).is_some_and(env_value),
+        "parenthesized_expression" => n.named_child(0).is_some_and(|c| env_value(c, src)),
         "binary_expression" => {
             n.child_by_field_name("operator")
                 .is_some_and(|o| o.kind() == "+")
-                && n.child_by_field_name("left").is_some_and(concat_part)
-                && n.child_by_field_name("right").is_some_and(|r| {
-                    matches!(
-                        r.kind(),
-                        "string_literal" | "number_literal" | "boolean_literal" | "null_literal"
-                    )
-                })
+                && n.child_by_field_name("left")
+                    .is_some_and(|l| concat_part(l, src))
+                && n.child_by_field_name("right")
+                    .is_some_and(|r| env_literal(r, src))
         }
         _ => false,
     }
@@ -948,10 +1126,22 @@ fn env_value(n: Node) -> bool {
 
 /// The left side of a `+` in an environment value: a literal, or another `+` of them
 /// (ModelParser.envValueForStringConcat).
-fn concat_part(n: Node) -> bool {
+fn concat_part(n: Node, src: &str) -> bool {
+    let n = unparen(n);
+    env_literal(n, src) || (n.kind() == "binary_expression" && env_value(n, src))
+}
+
+/// A literal in a `+` of an environment value. Parentheses don't count (Groovy's AST has
+/// none), and `-3` is the constant -3, as Groovy reads a negative number.
+fn env_literal(n: Node, src: &str) -> bool {
+    let n = unparen(n);
     match n.kind() {
         "string_literal" | "number_literal" | "boolean_literal" | "null_literal" => true,
-        "binary_expression" => env_value(n),
+        "unary_expression" => {
+            text(n, src).starts_with('-')
+                && n.child_by_field_name("operand")
+                    .is_some_and(|o| o.kind() == "number_literal")
+        }
         _ => false,
     }
 }
@@ -1062,7 +1252,10 @@ fn axis<'a>(
             let lit = c
                 .args
                 .first()
-                .filter(|a| c.args.len() == 1 && a.kind() == "string_literal")
+                // a bare word is the name as a string (`name compiler`)
+                .filter(|a| {
+                    c.args.len() == 1 && matches!(a.kind(), "string_literal" | "identifier")
+                })
                 .and_then(|a| constant_value(*a, src));
             match lit {
                 None => push(
@@ -1185,6 +1378,55 @@ mod tests {
         let src = format!("// header\nimport a.B\n{VALID}");
         let v = lint_file(Path::new("ci.groovy"), &src).unwrap();
         assert!(v.iter().all(|v| !v.rule.starts_with("Jenkins")), "{v:?}");
+    }
+
+    #[test]
+    fn forms_jenkins_accepts() {
+        // #287: each of these passes the Declarative Pipeline validator
+        let src = "pipeline {
+    this.agent any
+    this.options { this.timeout(time: 1, unit: 'HOURS') }
+    environment {
+        P = ('p') + \"${Q}\"
+        N = 'n' + -3
+        def A = 'a', B = 'b'
+    }
+    stages {
+        this.stage(('Build')) {
+            this.steps { echo 'x' }
+        }
+        stage('M') {
+            matrix {
+                axes { axis { name os; values 'linux', 'mac' } }
+                stages { stage('m') { steps { echo 'm' } } }
+            }
+        }
+    }
+}
+";
+        assert_eq!(rules(src), vec![]);
+        // and these don't
+        let bad = "pipeline {
+    agent any
+    environment {
+        P = ('p') + Q
+        N = 'n' + -Q
+        def A = 'a', B = b
+    }
+    stages {
+        stage(('a' + 'b')) { steps { echo 'x' } }
+    }
+}
+";
+        assert_eq!(
+            rules(bad),
+            vec![
+                ("JenkinsEnvironmentEntry", 4),
+                ("JenkinsEnvironmentEntry", 5),
+                ("JenkinsEnvironmentEntry", 6),
+                ("JenkinsStageName", 9),
+            ]
+        );
     }
 
     #[test]
@@ -1576,15 +1818,16 @@ mod tests {
         );
         assert_eq!(rules(&src), vec![]);
         // #222: a declaration of one variable with a value is an entry (horizon-sdv's
-        // `def kubernetesBasicPodTemplate = \"\"\"...`); its key and value are checked the same
+        // `def kubernetesBasicPodTemplate = \"\"\"...`); its key and value are checked the same.
+        // `def H = 1, I = 2` is two such declarations (#287).
         let src = env(
             "def A = \"x\"\nString B = 'y'\nfinal C = credentials('c')\ndef D\ndef E = env.X\ndef (F, G) = ['f', 'g']\ndef H = 1, I = 2\ndef A = 'again'",
         );
         assert_eq!(
             rules(&src),
-            (7..=11)
+            [7, 8, 9, 11]
                 .map(|l| ("JenkinsEnvironmentEntry", l))
-                .collect::<Vec<_>>()
+                .to_vec()
         );
     }
 

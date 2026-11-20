@@ -7,9 +7,49 @@
 //! `WhereBlockRewriter.splitRow` does it: on every `|` and `||`, through parentheses, since
 //! Groovy's AST has none.
 
-use super::{Violation, at, has_interpolation};
+use super::{Rule, Violation, at, has_interpolation};
 use crate::text;
 use tree_sitter::Node;
+
+pub(super) const RULES: &[Rule] = &[
+    // Spock specifications (src/lint/spock.rs)
+    Rule {
+        name: "SpockBlockOrder",
+        default: true,
+        description: "feature method blocks in an order Spock rejects, or a label Spock doesn't know",
+        why: "Spock refuses to compile feature blocks out of order (`then:` without a `when:` before it), so the spec fails to build.",
+        bad: "class MathSpec extends Specification {\n    def 'adds'() {\n        then:\n        1 + 1 == 2\n    }\n}",
+        good: "class MathSpec extends Specification {\n    def 'adds'() {\n        expect:\n        1 + 1 == 2\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "SpockEmptyBlock",
+        default: false,
+        description: "an empty then: or expect: block (off by default: Spock allows it, and its own tests use empty blocks on purpose)",
+        why: "A `then:` or `expect:` block with only a description checks nothing, so the feature passes whatever happens.",
+        bad: "class MathSpec extends Specification {\n    def 'runs'() {\n        when:\n        run()\n        then: 'it does not throw'\n    }\n}",
+        good: "class MathSpec extends Specification {\n    def 'runs'() {\n        when:\n        run()\n        then: 'it does not throw'\n        noExceptionThrown()\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "SpockDataTableColumns",
+        default: true,
+        description: "a data table row with a different number of columns than the row above",
+        why: "A data table row with a missing or extra cell is a compile error, or shifts the values into the wrong variables.",
+        bad: "class MathSpec extends Specification {\n    def 'max'() {\n        expect:\n        Math.max(a, b) == c\n        where:\n        a | b | c\n        1 | 2\n    }\n}",
+        good: "class MathSpec extends Specification {\n    def 'max'() {\n        expect:\n        Math.max(a, b) == c\n        where:\n        a | b | c\n        1 | 2 | 2\n    }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "SpockUnassertedCondition",
+        default: true,
+        description: "a comparison, a predicate call (xs.contains(x), s.startsWith(p), m.isEmpty(), ...) or a property read (x.done, xs[0].valid) in a then: or expect: block nested in an if, loop, switch, try or a .each { } (eachWithIndex, reverseEach, forEach, times) closure, which Spock never asserts",
+        why: "Spock turns only the top-level expression statements of a then: or expect: block into conditions. A comparison, a predicate call such as `xs.contains(x)` or `!m.isEmpty()`, or a property read such as `xs[0].valid`, inside `if`/`else`, a loop, a `switch` case, `try` or a closure passed to `each` is evaluated and thrown away, so the check can never fail. Write `assert` in front of it, or check a collection with `verifyEach` or `verifyAll { }` (Spock asserts conditions nested in `with { }`, `verifyAll { }`, `verifyEach` and `@Verify` helpers, so those aren't reported). Checked against Spock 2.4.",
+        bad: "class ResultSpec extends Specification {\n    def 'parses'() {\n        when:\n        def r = parse(input)\n\n        then:\n        if (valid) {\n            r.value == 42\n        }\n        r.items.each { it.size() > 0 }\n    }\n}",
+        good: "class ResultSpec extends Specification {\n    def 'parses'() {\n        when:\n        def r = parse(input)\n\n        then:\n        if (valid) {\n            assert r.value == 42\n        }\n        r.items.every { it.size() > 0 }\n    }\n}",
+        fixable: false,
+    },
+];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum B {
@@ -190,7 +230,14 @@ pub(super) fn class(
                     classes(root.unwrap_or(class), src, &mut c);
                     c
                 });
-                spec(local, sup, base).unwrap_or_else(|| imports_spock(src))
+                // a JUnit `@Test` method makes it a JUnit class, whatever the file imports
+                spec(local, sup, base).unwrap_or_else(|| {
+                    imports_spock(src)
+                        && !body.named_children(&mut body.walk()).any(|m| {
+                            m.kind() == "method_declaration"
+                                && super::basic::annotations(src, m).contains(&"Test")
+                        })
+                })
             };
     if !spec {
         return;
@@ -738,13 +785,25 @@ mod tests {
             let src = format!("{import}\n{src}");
             assert_eq!(unasserted(&src), vec![5], "{src}");
         }
+        // #256: a JUnit class in a file that imports Spock (Gradle's integration tests)
+        let src = "import spock.lang.Specification\nimport org.junit.Test\nclass FooTest extends SomeJUnitBase {\n  @Test\n  void works() {\n    when:\n    run()\n    when:\n    run()\n    then:\n    true\n  }\n}\n";
+        let spock: Vec<_> = lint(src)
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.rule.starts_with("Spock"))
+            .collect();
+        assert_eq!(spock, vec![]);
         // a base in another file: as the project tells (`Projects::spec_base`)
         let src = format!("class T extends Base {{\n{feature}}}\n");
         for (verdict, want) in [(Some(true), vec![4]), (Some(false), vec![]), (None, vec![])] {
-            let vs = crate::lint::lint_with(std::path::Path::new(""), &src, &|n| {
-                assert_eq!(n, "Base");
-                verdict
-            });
+            let vs = crate::lint::lint_with(
+                std::path::Path::new(""),
+                &src,
+                &crate::lint::Context::new(|n| {
+                    assert_eq!(n, "Base");
+                    verdict
+                }),
+            );
             let got: Vec<_> = vs.unwrap().into_iter().map(|v| v.line).collect();
             assert_eq!(got, want, "{verdict:?}");
         }

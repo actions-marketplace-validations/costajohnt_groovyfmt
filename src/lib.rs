@@ -1,16 +1,43 @@
+//! groovyfmt, a formatter and linter for Groovy, Gradle build scripts and Jenkinsfiles.
+//!
+//! The `groovyfmt` binary is the only supported interface. The modules here are public only
+//! so the binary can use them; they are hidden from the docs and may change in any release.
+
+#[doc(hidden)]
 pub mod baseline;
+#[doc(hidden)]
 pub mod codenarc;
 mod codenarc_data;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod diff;
+#[doc(hidden)]
+pub mod equiv;
+#[doc(hidden)]
+pub mod fileio;
+#[doc(hidden)]
 pub mod fix;
+#[doc(hidden)]
 pub mod format;
+#[doc(hidden)]
+pub mod git;
+#[doc(hidden)]
 pub mod json;
+#[doc(hidden)]
 pub mod lint;
+#[doc(hidden)]
 pub mod lsp;
+#[doc(hidden)]
+pub mod output;
+#[doc(hidden)]
 pub mod report;
 mod spacing;
+#[doc(hidden)]
 pub mod syntax;
+#[doc(hidden)]
+pub mod walk;
+#[doc(hidden)]
 pub mod wrap;
 
 use std::path::Path;
@@ -207,10 +234,19 @@ pub fn is_walked_file(path: &Path) -> bool {
 /// Whether `src`, which doesn't parse, reads as something other than Groovy: a first line
 /// that is a `#!` for another program (a shell script), or a syntax error (of the first
 /// `syntax::MAX_REPORTED`) on a line starting with `#` (a Dockerfile, shell or YAML comment)
-/// or a template tag (Jinja `{%`, `{#`, ERB/JSP `<%`, Mustache `{{#`, `{{/`). A pipeline
-/// with a typo fails on Groovy code, so it is still reported.
+/// or a template tag (Jinja `{%`, `{#`, ERB/JSP `<%`, Mustache `{{#`, `{{/`, FreeMarker `<#`),
+/// or a first line, past blank lines and `#` comments, that starts a Dockerfile (`FROM `,
+/// `ARG `). A pipeline with a typo fails on Groovy code, so it is still reported.
 fn not_groovy(src: &str, tree: &Tree) -> bool {
     if src.starts_with("#!") && !is_groovy_shebang(src.as_bytes()) {
+        return true;
+    }
+    if src
+        .lines()
+        .map(str::trim_start)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .is_some_and(|l| l.starts_with("FROM ") || l.starts_with("ARG "))
+    {
         return true;
     }
     let (errors, _) = syntax::errors(src, tree);
@@ -219,7 +255,7 @@ fn not_groovy(src: &str, tree: &Tree) -> bool {
         .filter_map(|e| src.lines().nth(e.line - 1))
         .any(|l| {
             let l = l.trim_start();
-            ["#", "{%", "{#", "{{#", "{{/", "<%"]
+            ["#", "{%", "{#", "{{#", "{{/", "<%", "<#"]
                 .iter()
                 .any(|m| l.starts_with(m))
         })
@@ -325,6 +361,7 @@ const NOT_GROOVY: &[&str] = &[
     "erb",
     "mustache",
     "hbs",
+    "ftl",
     "patch",
     "diff",
     "cfg",
@@ -629,12 +666,117 @@ mod tests {
             "p.accept f(/'/)\n",
             "foo (/'/)\n",
             "def x = new int @A(",
+            // a parenthesized command's lookahead past `=` for a lambda's `->`, and its
+            // gap before an operator (#261)
+            "(a b = (",
+            "(a b \\\n",
+            "x = (a b // c\n",
+            // each unclosed `/*` scanned to the end of the input (#278)
+            "x /*\n",
+            "(a /*",
+            "f(/*",
         ] {
             let run = |n: usize| {
                 std::hint::black_box(super::parse(&line.repeat(n)));
             };
             crate::scaling::assert_scales_up_to(&format!("{line:?}"), run, 2_000, 256_000, 4, 8);
         }
+    }
+
+    #[test]
+    fn paren_command_assignment_before_a_comment_ending_the_input_parses() {
+        // no final line break after the comment (#261): Groovy 3 and 4 call `a(b = c)`
+        for src in [
+            "x = (a b = c) // c",
+            "x = (a b = c)\n// tail",
+            "x = (a b /* c */ - d) // c",
+        ] {
+            let tree = super::parse(src);
+            assert!(
+                !tree.root_node().has_error(),
+                "{src:?}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
+
+    #[test]
+    fn closure_parameter_default_call_with_arguments() {
+        // the default is a call, not a lambda passed to `f` (#287), as Groovy 2.4, 3 and 4
+        // read it
+        for src in [
+            "def c = { y = f(1, 2) -> y }",
+            "def c = { x, y = helper(1, 2) -> x }",
+            "def c = { y = f(a) -> y }",
+            "def c = { Integer y = o.f(1, 'b') -> y }",
+        ] {
+            let tree = super::parse(src);
+            let mut defaults = 0;
+            let mut lambdas = 0;
+            super::preorder(tree.root_node(), |n| {
+                match n.kind() {
+                    "closure_parameter" if n.child_by_field_name("default").is_some() => {
+                        defaults += 1
+                    }
+                    "lambda_expression" => lambdas += 1,
+                    _ => {}
+                }
+                true
+            });
+            assert!(
+                defaults == 1 && lambdas == 0 && !tree.root_node().has_error(),
+                "{src:?}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
+
+    #[test]
+    fn closure_parameters_after_a_generic_first_parameter() {
+        // not a declaration `Map<..> m, int` and a lambda `n -> ...` (#283), as Groovy
+        // 2.4, 3 and 4 read them
+        for (src, count) in [
+            (
+                "def a = { Map<String, List<Integer>> m, int n -> (String) m }",
+                2,
+            ),
+            ("def a = { Map<String, Integer> m, int n -> m }", 2),
+            ("def a = { String[] m, int n -> m }", 2),
+            ("def a = { String m = 'x', int n -> m }", 2),
+            ("def a = { final Map<K, V> m, a, def n -> m }", 3),
+            ("def a = { Map<K, V> m,\n    int n ->\n    m\n}", 2),
+        ] {
+            let tree = super::parse(src);
+            let mut params = Vec::new();
+            let mut lambdas = 0;
+            super::preorder(tree.root_node(), |n| {
+                match n.kind() {
+                    "closure_parameter" => params.push(super::text(n, src).to_string()),
+                    "lambda_expression" => lambdas += 1,
+                    _ => {}
+                }
+                true
+            });
+            assert!(
+                params.len() == count && lambdas == 0 && !tree.root_node().has_error(),
+                "{src:?}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
+
+    #[test]
+    fn anonymous_class_body_of_many_fields_stays_a_class_body() {
+        // each field weighed +1 for the closure reading, against -1000 (#283)
+        let fields = "    int f = 1\n".repeat(2_000);
+        let src = format!("def x = new Object() {{\n{fields}    void m() {{ f }}\n}}\n");
+        let tree = super::parse(&src);
+        let mut bodies = 0;
+        super::preorder(tree.root_node(), |n| {
+            bodies += usize::from(n.kind() == "class_body");
+            true
+        });
+        assert!(bodies == 1 && !tree.root_node().has_error());
     }
 
     #[test]

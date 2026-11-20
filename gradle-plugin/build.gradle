@@ -61,7 +61,7 @@ tasks.named('check') {
 }
 
 gradlePlugin {
-    website = 'https://github.com/costajohnt/groovyfmt'
+    website = 'https://github.com/costajohnt/groovyfmt/tree/main/gradle-plugin'
     vcsUrl = 'https://github.com/costajohnt/groovyfmt'
     plugins {
         groovyfmt {
@@ -70,6 +70,12 @@ gradlePlugin {
             displayName = 'groovyfmt'
             description = 'Formats and lints Groovy, Gradle build scripts and Jenkinsfiles with groovyfmt, downloading and verifying its release binary.'
             tags.set(['groovy', 'formatter', 'lint', 'jenkinsfile', 'codestyle'])
+            // Covered by GroovyfmtPluginFunctionalTest. Once declared, every later version must declare it too.
+            compatibility(it) {
+                features {
+                    configurationCache = true
+                }
+            }
         }
     }
 }

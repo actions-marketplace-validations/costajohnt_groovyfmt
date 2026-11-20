@@ -12850,6 +12850,16 @@
             "named": true
           }
         ]
+      },
+      "type_parameters": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_parameters",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -19874,6 +19884,10 @@
           },
           {
             "type": "closure",
+            "named": true
+          },
+          {
+            "type": "command_chain",
             "named": true
           },
           {

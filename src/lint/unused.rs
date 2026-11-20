@@ -8,10 +8,41 @@
 //! uses are found by binary search over the positions of its name.
 
 use super::basic::{annotations, has_modifier, is_method};
-use super::{Violation, at, words};
+use super::{Rule, Violation, at, words};
 use crate::text;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
+
+pub(super) const RULES: &[Rule] = &[
+    // Unused code (src/lint/unused.rs)
+    Rule {
+        name: "UnusedPrivateField",
+        default: true,
+        description: "a private field whose name appears nowhere else in the file, nor in another file of the project that names its class (not one with an annotation, serialVersionUID, or in a class whose annotation reads fields)",
+        why: "A private field nothing reads is dead state: left over from a refactoring, or a sign that the code meant to use it doesn't. A private member used only by a DSL script run with the class as its delegate (a `DelegatingScript`, a builder) looks unused here; mark it `@SuppressWarnings('UnusedPrivateField')` (or the class, for all of them), since removing it breaks the script. A method at the top level of a `.gradle` script is also its project's, which another build script can call (`rootProject.f()`), so one whose name another `.gradle` script of the project mentions is not reported.",
+        bad: "class Client {\n    private int retries = 3\n    def get(url) { url.toURL().text }\n}",
+        good: "class Client {\n    def get(url) { url.toURL().text }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "UnusedPrivateMethod",
+        default: true,
+        description: "a private method whose name appears nowhere else in the file (for getX/isX/setX, nor the property x), nor in another file of the project that names its class",
+        why: "A private method nothing calls is dead code that still has to be read and maintained. A private member used only by a DSL script run with the class as its delegate (a `DelegatingScript`, a builder) looks unused here; mark it `@SuppressWarnings('UnusedPrivateMethod')` (or the class, for all of them), since removing it breaks the script.",
+        bad: "class Client {\n    def get(url) { url.toURL().text }\n    private String trimmed(s) { s.trim() }\n}",
+        good: "class Client {\n    def get(url) { url.toURL().text }\n}",
+        fixable: false,
+    },
+    Rule {
+        name: "UnusedVariable",
+        default: true,
+        description: "a local variable whose name never appears after its declaration in its block (not a script's top-level variable, `_`, `ignored`, Spock's `E e = thrown()`, an annotated one, or a `def (a, b)` tuple)",
+        why: "A variable nothing reads is dead code, or the sign of a typo: the code meant to use it and uses something else.",
+        bad: "def total(items) {\n    def count = items.size()\n    items.sum()\n}",
+        good: "def total(items) {\n    items.sum()\n}",
+        fixable: false,
+    },
+];
 
 /// The node kinds `check` looks at: declarations and scopes.
 pub(super) const KINDS: &[&str] = &[
@@ -186,6 +217,58 @@ fn dynamic_prefixes(src: &str, nodes: &[Node]) -> Vec<String> {
     out
 }
 
+/// Groovy's operator methods and the tokens that call them: `this << x` calls a private
+/// `leftShift`, `a + b` a `plus`. No tokens: called without one (`obj(x)`, `if (obj)`).
+const OPERATOR_METHODS: &[(&str, &[&str])] = &[
+    ("plus", &["+", "+="]),
+    ("minus", &["-", "-="]),
+    ("multiply", &["*", "*="]),
+    ("div", &["/", "/="]),
+    ("mod", &["%", "%="]),
+    ("remainder", &["%", "%="]),
+    ("power", &["**", "**="]),
+    ("or", &["|", "|="]),
+    ("and", &["&", "&="]),
+    ("xor", &["^", "^="]),
+    ("next", &["++"]),
+    ("previous", &["--"]),
+    ("getAt", &["[", "?["]),
+    ("putAt", &["["]),
+    ("leftShift", &["<<", "<<="]),
+    ("rightShift", &[">>", ">>="]),
+    ("rightShiftUnsigned", &[">>>", ">>>="]),
+    ("isCase", &["in", "case"]),
+    ("isNotCase", &["!in"]),
+    ("asType", &["as"]),
+    ("compareTo", &["<=>", "<", ">", "<=", ">="]),
+    ("equals", &["==", "!="]),
+    ("negative", &["-"]),
+    ("positive", &["+"]),
+    ("bitwiseNegate", &["~"]),
+    ("call", &[]),
+    ("asBoolean", &[]),
+];
+
+/// Whether `name` is an operator method whose operator appears in `class` (or that needs
+/// none). Any use of the operator counts, on whatever operand: that only hides a report.
+fn operator_used(name: &str, class: Node) -> bool {
+    let Some((_, ops)) = OPERATOR_METHODS.iter().find(|(m, _)| *m == name) else {
+        return false;
+    };
+    if ops.is_empty() {
+        return true;
+    }
+    let mut c = class.walk();
+    let mut stack = vec![class];
+    while let Some(n) = stack.pop() {
+        if !n.is_named() && ops.contains(&n.kind()) {
+            return true;
+        }
+        stack.extend(n.children(&mut c));
+    }
+    false
+}
+
 /// Class annotations whose transforms read private fields (`includeFields`, JPA entities,
 /// builders), as CodeNarc ignores `@Entity` classes.
 fn reads_fields(src: &str, class: Node) -> bool {
@@ -339,7 +422,10 @@ pub(super) fn check(
                     continue;
                 };
                 let name = text(n, src);
-                if !has_modifier(d, "private") || CALLED_BY_NAME.contains(&name) {
+                if !has_modifier(d, "private")
+                    || CALLED_BY_NAME.contains(&name)
+                    || d.parent().is_some_and(|body| operator_used(name, body))
+                {
                     continue;
                 }
                 // `getFoo()` / `isFoo()` / `setFoo(x)` are also called as the property `foo`
@@ -574,6 +660,17 @@ mod tests {
     fn private_methods() {
         let src = "class A {\n  private void unused() { }\n  private void called() { }\n  private getThing() { 1 }\n  private boolean isOn() { true }\n  private void byPointer() { }\n  private void byName() { }\n  private void methodMissing(String n, a) { }\n  private static helper() { }\n  @PostConstruct private void init() { }\n  void unusedButPublic() { }\n  def f() {\n    called()\n    thing\n    def p = this.&byPointer\n    invokeMethod('byName', null)\n    p()\n  }\n}\n";
         assert_eq!(rules(src, "UnusedPrivateMethod"), vec![2, 5, 9]);
+    }
+
+    #[test]
+    fn operator_methods_are_used_through_their_operator() {
+        // #256: mircomp FactorOracle, `this << item`
+        let src = "class A {\n  void add(x) { this << x }\n  private void leftShift(x) { }\n  private A plus(A o) { this }\n  private A minus(A o) { this }\n  def f(A a) { a + a }\n  private void call(x) { }\n}\n";
+        assert_eq!(rules(src, "UnusedPrivateMethod"), vec![5]);
+        // the operator in another class doesn't count
+        let src =
+            "class A {\n  private void leftShift(x) { }\n}\nclass B {\n  def f(a) { a << 1 }\n}\n";
+        assert_eq!(rules(src, "UnusedPrivateMethod"), vec![2]);
     }
 
     #[test]
