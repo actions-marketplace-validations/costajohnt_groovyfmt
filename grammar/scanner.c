@@ -153,42 +153,6 @@ static bool finish_command_operand(TSLexer *lexer) {
     return true;
 }
 
-// `_paren_command_start`, with the lexer just past a parenthesized command's
-// first name (and the spaces after it when `spaced`): whether an index or a
-// binary operator continues the name into an expression argument. `?.`, `->`,
-// a comment and `=` alone don't; neither do `.`, `?` and `<`
-// right after the name, which the callers' other branches read.
-static bool paren_argument_continues(TSLexer *lexer, bool spaced) {
-    int32_t c = lexer->lookahead;
-    if (c == '[' || c == '+' || c == '*' || c == '%' || c == '&' || c == '|' || c == '^'
-        || c == '>') {
-        return true;
-    }
-    if (spaced && c == '<') {
-        return true;
-    }
-    if (c == '-' || c == '=' || c == '!' || c == '/' || (spaced && c == '?')) {
-        lexer->advance(lexer, false);
-        int32_t n = lexer->lookahead;
-        switch (c) {
-            case '-': return n != '>';
-            case '=': return n == '=' || n == '~';
-            case '!': return n == '=' || n == 'i';
-            case '/': return n != '/' && n != '*';
-            default: return n != '.';
-        }
-    }
-    // `(a b in l)` and `(a b as int)` are `a(b in l)` and `a(b as int)` in
-    // Groovy 3 and 4. Only whole words: `(a b inner)` is not an operator.
-    if (spaced && (c == 'i' || c == 'a')) {
-        char word[12];
-        unsigned len = read_word(lexer, word, sizeof(word));
-        return (len == 10 && memcmp(word, "instanceof", 10) == 0)
-            || (len == 2 && (memcmp(word, "in", 2) == 0 || memcmp(word, "as", 2) == 0));
-    }
-    return false;
-}
-
 // The rest of `scan_command_named_key`, once the identifier is read.
 static bool finish_command_named_key(TSLexer *lexer, const bool *valid_symbols,
                                      const char *word, unsigned len) {
@@ -437,6 +401,134 @@ static bool skip_parens(TSLexer *lexer) {
             }
             advance(lexer);
         }
+    }
+    return false;
+}
+
+// What ends a gap that skip_paren_gap skips.
+enum ParenGap { GAP_END, GAP_SLASH, GAP_FAIL };
+
+// Skips a gap inside parentheses: whitespace, line breaks, `\` continuations and
+// comments, all of which Groovy 3 and 4 read like a space there. GAP_END at the
+// first other character or the end of input; GAP_SLASH past a `/` that starts
+// no comment, a division; GAP_FAIL at a stray `\`, an unclosed comment or the
+// end of the step budget.
+static enum ParenGap skip_paren_gap(TSLexer *lexer, unsigned *budget) {
+    for (;;) {
+        if (lexer->eof(lexer)) {
+            return GAP_END;
+        }
+        if (!skip_step(lexer, budget)) {
+            return GAP_FAIL;
+        }
+        int32_t g = lexer->lookahead;
+        if (is_whitespace(g)) {
+            lexer->advance(lexer, false);
+        } else if (g == '\\') {
+            lexer->advance(lexer, false);
+            if (lexer->lookahead == '\r') {
+                lexer->advance(lexer, false);
+            }
+            if (lexer->lookahead != '\n') {
+                return GAP_FAIL;
+            }
+        } else if (g == '/') {
+            lexer->advance(lexer, false);
+            if (lexer->lookahead == '/') {
+                while (lexer->lookahead != '\n') {
+                    if (lexer->eof(lexer)) {
+                        return GAP_END; // a comment that ends the input
+                    }
+                    if (!skip_step(lexer, budget)) {
+                        return GAP_FAIL;
+                    }
+                    lexer->advance(lexer, false);
+                }
+            } else if (lexer->lookahead == '*') {
+                lexer->advance(lexer, false);
+                int32_t prev = 0;
+                while (!(prev == '*' && lexer->lookahead == '/')) {
+                    if (!skip_step(lexer, budget)) {
+                        return GAP_FAIL;
+                    }
+                    prev = lexer->lookahead;
+                    lexer->advance(lexer, false);
+                }
+                lexer->advance(lexer, false);
+            } else {
+                return GAP_SLASH;
+            }
+        } else {
+            return GAP_END;
+        }
+    }
+}
+
+// `_paren_command_start`, with the lexer just past a parenthesized command's
+// first name: whether an index or a binary operator continues the name into an
+// expression argument. When `spaced`, the gap before the operator is skipped
+// first (skip_paren_gap): `(a b /* c */ - d)` and `(a b` then `- c`. `?.` and
+// `->` don't continue; neither does `=` in a parameter list (see below).
+// Neither do `.`, `?` and `<` right after the name, which the callers' other
+// branches read. A gap past the step budget is the default reading, false.
+static bool paren_argument_continues(TSLexer *lexer, bool spaced) {
+    unsigned budget = SKIP_BUDGET;
+    if (spaced) {
+        enum ParenGap gap = skip_paren_gap(lexer, &budget);
+        if (gap != GAP_END) {
+            return gap == GAP_SLASH;
+        }
+    }
+    int32_t c = lexer->lookahead;
+    if (c == '[' || c == '+' || c == '*' || c == '%' || c == '&' || c == '|' || c == '^'
+        || c == '>') {
+        return true;
+    }
+    if (spaced && c == '<') {
+        return true;
+    }
+    if (c == '-' || c == '=' || c == '!' || c == '/' || (spaced && c == '?')) {
+        lexer->advance(lexer, false);
+        int32_t n = lexer->lookahead;
+        switch (c) {
+            case '-': return n != '>';
+            case '=':
+                if (n == '=' || n == '~') {
+                    return true;
+                }
+                // `(a b = c)` is `a(b = c)`, unless the parentheses hold
+                // parameters with a default: a lambda's, `(String s = 'x') -> s`,
+                // or, in a script, the method's of `List<T> m(Map p = [:]) {`.
+                // A comment or a `\` continuation may come before the `{`.
+                if (!skip_parens(lexer)) {
+                    return false;
+                }
+                enum ParenGap gap = skip_paren_gap(lexer, &budget);
+                if (gap != GAP_END) {
+                    return gap == GAP_SLASH;
+                }
+                if (lexer->lookahead == '{') {
+                    return false;
+                }
+                if (lexer->lookahead == '-') {
+                    lexer->advance(lexer, false);
+                    return lexer->lookahead != '>';
+                }
+                char word[8];
+                unsigned len = read_word(lexer, word, sizeof(word));
+                return !(len == 6 && memcmp(word, "throws", 6) == 0);
+            case '!': return n == '=' || n == 'i';
+            case '/': return n != '/' && n != '*';
+            default: return n != '.';
+        }
+    }
+    // `(a b in l)` and `(a b as int)` are `a(b in l)` and `a(b as int)` in
+    // Groovy 3 and 4. Only whole words: `(a b inner)` is not an operator.
+    if (spaced && (c == 'i' || c == 'a')) {
+        char word[12];
+        unsigned len = read_word(lexer, word, sizeof(word));
+        return (len == 10 && memcmp(word, "instanceof", 10) == 0)
+            || (len == 2 && (memcmp(word, "in", 2) == 0 || memcmp(word, "as", 2) == 0));
     }
     return false;
 }
@@ -1159,14 +1251,11 @@ bool tree_sitter_groovy_external_scanner_scan(
             // 4). Past spaces this decides: a key there, `(f a : 1)`, is left to
             // the grammar, as is a name argument, `(a b)` or `(String s) ->`.
             if (valid_symbols[PAREN_COMMAND_START] && is_name_argument(word, len)) {
-                bool spaced = lexer->lookahead == ' ' || lexer->lookahead == '\t';
                 int32_t n = lexer->lookahead;
+                bool spaced = n == ' ' || n == '\t' || n == '\\';
                 if (spaced || n == '[' || n == '+' || n == '-' || n == '*' || n == '%'
                     || n == '&' || n == '|' || n == '^' || n == '>' || n == '=' || n == '!'
                     || n == '/') {
-                    while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
-                        advance(lexer);
-                    }
                     if (!paren_argument_continues(lexer, spaced)) {
                         return false;
                     }
@@ -1211,6 +1300,13 @@ bool tree_sitter_groovy_external_scanner_scan(
                         lexer->result_symbol = COMMAND_LITERAL_START;
                         return true;
                     }
+                    return false;
+                }
+                // `(a b?c:d)` and `(a l?[0] - c)`: a ternary, an elvis or a safe
+                // index continues a parenthesized command's argument.
+                if (valid_symbols[PAREN_COMMAND_START] && is_name_argument(word, len)) {
+                    lexer->result_symbol = PAREN_COMMAND_START;
+                    return true;
                 }
                 return false;
             }
@@ -1224,25 +1320,42 @@ bool tree_sitter_groovy_external_scanner_scan(
                 while (is_whitespace(lexer->lookahead)) {
                     advance(lexer);
                 }
-                // `x.url isSnapshot` then `? "a"` then `: "b"`, or then `?: 2`:
-                // a line can't start with `?`, so a ternary or elvis there
-                // continues the argument, as Groovy reads it.
-                if (lexer->lookahead == '?') {
-                    advance(lexer);
-                    if (lexer->lookahead != '.') {
-                        lexer->result_symbol = COMMAND_LITERAL_START;
+                // `(a b` then `- c` is `a(b - c)`: in parentheses the line
+                // break is a gap (see paren_argument_continues).
+                int32_t n = lexer->lookahead;
+                bool paren = valid_symbols[PAREN_COMMAND_START] && is_name_argument(word, len);
+                if (paren && n != '?' && n != '*' && n != '.') {
+                    // A miss has read past the operator, so only the name is left.
+                    if (paren_argument_continues(lexer, true)) {
+                        lexer->result_symbol = PAREN_COMMAND_START;
                         return true;
                     }
-                } else if (lexer->lookahead == '*') {
-                    advance(lexer);
-                }
-                if (lexer->lookahead == '.') {
-                    advance(lexer);
-                    // also `.@field` and `.&method`
-                    if (is_ident_start(lexer->lookahead) || lexer->lookahead == '@'
-                        || lexer->lookahead == '&') {
-                        lexer->result_symbol = COMMAND_LITERAL_START;
-                        return true;
+                } else {
+                    // `x.url isSnapshot` then `? "a"` then `: "b"`, or then `?: 2`:
+                    // a line can't start with `?`, so a ternary or elvis there
+                    // continues the argument, as Groovy reads it.
+                    if (n == '?') {
+                        advance(lexer);
+                        if (lexer->lookahead != '.') {
+                            lexer->result_symbol = COMMAND_LITERAL_START;
+                            return true;
+                        }
+                    } else if (n == '*') {
+                        advance(lexer);
+                        // `(a b` then `* c`
+                        if (paren && lexer->lookahead != '.') {
+                            lexer->result_symbol = PAREN_COMMAND_START;
+                            return true;
+                        }
+                    }
+                    if (lexer->lookahead == '.') {
+                        advance(lexer);
+                        // also `.@field` and `.&method`
+                        if (is_ident_start(lexer->lookahead) || lexer->lookahead == '@'
+                            || lexer->lookahead == '&') {
+                            lexer->result_symbol = COMMAND_LITERAL_START;
+                            return true;
+                        }
                     }
                 }
                 if (!valid_symbols[COMMAND_NAME_START] || !is_name_argument(word, len)) {

@@ -656,11 +656,34 @@ mod tests {
             "p.accept f(/'/)\n",
             "foo (/'/)\n",
             "def x = new int @A(",
+            // a parenthesized command's lookahead past `=` for a lambda's `->`, and its
+            // gap before an operator (#261). An unclosed `/*` isn't here: `x /*` repeated
+            // is already superlinear in the runtime's comment lexing.
+            "(a b = (",
+            "(a b \\\n",
+            "x = (a b // c\n",
         ] {
             let run = |n: usize| {
                 std::hint::black_box(super::parse(&line.repeat(n)));
             };
             crate::scaling::assert_scales_up_to(&format!("{line:?}"), run, 2_000, 256_000, 4, 8);
+        }
+    }
+
+    #[test]
+    fn paren_command_assignment_before_a_comment_ending_the_input_parses() {
+        // no final line break after the comment (#261): Groovy 3 and 4 call `a(b = c)`
+        for src in [
+            "x = (a b = c) // c",
+            "x = (a b = c)\n// tail",
+            "x = (a b /* c */ - d) // c",
+        ] {
+            let tree = super::parse(src);
+            assert!(
+                !tree.root_node().has_error(),
+                "{src:?}: {}",
+                tree.root_node().to_sexp()
+            );
         }
     }
 
