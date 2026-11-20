@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The Gradle plugin declares configuration cache compatibility on the Gradle Plugin Portal. It already worked with the configuration cache; its tests run with `--configuration-cache`.
+
 ### Fixed
 
 - Five more parenthesized command call forms that Groovy 3 and 4 accept now parse: `(a b = c)` (`a(b = c)`), an unspaced ternary or elvis `(a b?c:d)`, a safe index with an operator `(a l?[0] - c)`, and a comment, a line break or a backslash continuation before the operator, `(a b /* c */ - d)` and `(a b` then `- c)`. A lambda whose parameter has a default, `(String s = 'x') -> s`, stays a lambda. ([#261](https://github.com/costajohnt/groovyfmt/issues/261))
