@@ -2732,7 +2732,10 @@ module.exports = grammar({
       ...closureBody($),
     ),
 
-    _new_closure_open: $ => prec.dynamic(-1000, seq($._command_closure_start, '{')),
+    // -32000, near the 16-bit limit of a dynamic precedence: a class body flips to the
+    // closure reading only past about 32,000 members (31,000 stay a class body, 33,000
+    // flip). At -1000 it flipped at about 1,000.
+    _new_closure_open: $ => prec.dynamic(-32000, seq($._command_closure_start, '{')),
 
     // §3.2 / §5.11 — argument list. Positional args are `_expression`;
     // named args (Groovy's `k: v` in call position) are `map_entry`
@@ -3041,9 +3044,13 @@ module.exports = grammar({
       alias($._bare_declarator, $.variable_declarator),
     ),
 
+    // prec.dynamic: each parameter before a `,` outweighs a declaration and a
+    // lambda, `{ Map<K, V> m, int n -> }` not `Map<K, V> m, int` and `n -> `,
+    // as Groovy 2.4, 3 and 4 read it. 2, not 1: a default value costs its
+    // parameter 1, and the declaration's reading has defaults only before a `,`.
     closure_parameters: $ => seq(
       optional(seq(
-        repeat(seq($.closure_parameter, ',')),
+        repeat(prec.dynamic(2, seq($.closure_parameter, ','))),
         choice(
           $.closure_parameter,
           alias($._closure_parameter_name_default, $.closure_parameter),
