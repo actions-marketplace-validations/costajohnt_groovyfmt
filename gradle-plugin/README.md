@@ -8,7 +8,7 @@ Formats and lints Groovy sources, Gradle build scripts and Jenkinsfiles in a Gra
 // build.gradle
 plugins {
     id 'base'  // or any plugin that adds check, such as java
-    id 'io.github.costajohnt.groovyfmt' version '0.30.1'
+    id 'io.github.costajohnt.groovyfmt' version '0.32.0'
 }
 ```
 
@@ -35,7 +35,7 @@ Everything is optional:
 
 ```groovy
 groovyfmt {
-    version = '0.30.1'                          // default: the plugin's own version
+    version = '0.32.0'                          // default: the plugin's own version
     binary = file('/usr/local/bin/groovyfmt')  // run this binary and download nothing
     args = ['--strict']                        // added to every run
     paths = ['src', 'build.gradle']            // default: the project directory
