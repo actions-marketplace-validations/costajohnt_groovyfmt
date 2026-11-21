@@ -65,7 +65,7 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=$PWD/scripts/wine-run.sh cargo test --
 `publish-gradle-plugin` runs `./gradlew check publishPlugins` (`com.gradle.plugin-publish`). That needs, once:
 
 1. The repository public. The plugin downloads release assets, and once published anyone can apply it; while the repository is private, only users with a token can.
-2. A Gradle Plugin Portal account (https://plugins.gradle.org, sign in with GitHub as `costajohnt`). Sign in with the GitHub account: an `io.github.costajohnt.*` id is approved automatically when the account is linked to that GitHub user, and goes to manual review otherwise. The id was unclaimed when this was written.
+2. A Gradle Plugin Portal account (https://plugins.gradle.org, sign in with GitHub as `costajohnt`). Sign in with the GitHub account: an `io.github.costajohnt.*` id is approved automatically when the account is linked to that GitHub user, and goes to manual review otherwise. Done: the id was approved on the second submission, after the first was rejected for missing documentation (the plugin's `README.md` answers that).
 3. An API key: on the portal, your profile, API Keys. Store the two values as repository secrets: `gh secret set GRADLE_PUBLISH_KEY --repo costajohnt/groovyfmt` and `gh secret set GRADLE_PUBLISH_SECRET --repo costajohnt/groovyfmt` (each prompts for the value).
 4. `gh variable set PUBLISH_GRADLE_PLUGIN --body true --repo costajohnt/groovyfmt`.
 
@@ -166,10 +166,9 @@ A version can't be replaced once published, only yanked. Once a CI publish has w
 
 ## Channels not published yet
 
-The repository, the Homebrew tap, crates.io, npm, the Visual Studio Marketplace and the ghcr.io image (since 0.29.0) are live. To switch on the rest:
+The repository, the Homebrew tap, crates.io, npm, the Visual Studio Marketplace, the ghcr.io image (since 0.29.0) and the Gradle Plugin Portal (since 0.30.1) are live. To switch on the rest:
 
-1. Gradle plugin: create the portal account and API key secrets as above, then set `PUBLISH_GRADLE_PLUGIN`.
-2. Open VSX: create the namespace and `OVSX_PAT` as above, then set `PUBLISH_OPENVSX`.
-3. JetBrains plugin: create the vendor, upload the first version by hand and store the token (and the signing secrets, if signing) as above, then set `PUBLISH_JETBRAINS`.
-4. Push the next release tag and check that the new jobs succeeded.
-5. In `README.md` (Install) and `docs/ci.md` (Gradle), drop the "not published yet" lines for each channel that is now published.
+1. Open VSX: create the namespace and `OVSX_PAT` as above, then set `PUBLISH_OPENVSX`.
+2. JetBrains plugin: create the vendor, upload the first version by hand and store the token (and the signing secrets, if signing) as above, then set `PUBLISH_JETBRAINS`.
+3. Push the next release tag and check that the new jobs succeeded.
+4. Update the install lines for each channel that is now published: `docs/editors.md` and the extension's own `README.md` (`editors/vscode/` or `editors/jetbrains/`).
