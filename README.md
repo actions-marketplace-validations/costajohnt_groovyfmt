@@ -44,6 +44,7 @@ test/groovy/BaseTest.groovy:2:1: UnusedImport: The [mock.CurrentBuild] import is
 - **Fast.** Formats the 635-file [spock](https://github.com/spockframework/spock) repo in 0.19 s (measured on 0.5). npm-groovy-lint didn't finish in 15 minutes ([benchmark](https://github.com/costajohnt/groovyfmt/blob/main/docs/coverage.md#speed)).
 - **Compared.** [Spotless](https://github.com/diffplug/spotless) formats Groovy with the Eclipse formatter (greclipse), on the JVM inside a Gradle or Maven build. [npm-groovy-lint](https://github.com/nvuillam/npm-groovy-lint) runs CodeNarc on a JVM. groovyfmt runs without a JVM or a build.
 - **Broad.** 99.6% of a 23,766-file corpus (grails-core, gradle, spock, nextflow, Jenkins pipelines) parses ([coverage](https://github.com/costajohnt/groovyfmt/blob/main/docs/coverage.md)).
+- **Tested on real code.** Run against more than 6,000 open source repositories without changing what any file means. Bugs it found have been fixed upstream in Apache Solr, Apache Beam, Spinnaker, GoCD, graphql-java, Nextflow and others: 22 merged so far.
 
 ## Install
 
