@@ -49,11 +49,14 @@ test/groovy/BaseTest.groovy:2:1: UnusedImport: The [mock.CurrentBuild] import is
 ## Install
 
 ```sh
-brew install costajohnt/tap/groovyfmt       # macOS, Linux
+brew trust costajohnt/tap                   # Homebrew 7+ (macOS, Linux)
+brew install costajohnt/tap/groovyfmt
 npm install --save-dev groovyfmt            # or: npx groovyfmt --check
 cargo install --locked groovyfmt            # Rust 1.90+ and a C compiler
 docker run --rm -v "$PWD:/src" -w /src ghcr.io/costajohnt/groovyfmt --check
 ```
+
+Homebrew 7 loads formulae from third-party taps only once they are trusted; without `brew trust` the install fails with `Refusing to load formula costajohnt/tap/groovyfmt from untrusted tap costajohnt/tap`. On an older Homebrew with no `brew trust` command, run only the install line.
 
 Prebuilt binaries for Linux (static musl), macOS and Windows, each with a `.sha256`, are on every [release](https://github.com/costajohnt/groovyfmt/releases). See also [Windows](https://github.com/costajohnt/groovyfmt/blob/main/docs/windows.md).
 
