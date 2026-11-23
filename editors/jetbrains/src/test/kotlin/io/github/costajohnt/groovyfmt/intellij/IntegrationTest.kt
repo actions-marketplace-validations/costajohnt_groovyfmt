@@ -296,16 +296,18 @@ class IntegrationTest : UsefulTestCase() {
         Files.copy(File(a).toPath(), b.toPath())
         b.setExecutable(true)
         expectServerThreads(b.path)
-        // The process LSP4IJ runs the server in. Not any process running the binary: LSP4IJ can
-        // lose a process it launches while it stops the server, and one of those, left running,
-        // is not the server.
-        fun server(): ProcessHandle? = LanguageServiceAccessor.getInstance(fixture.project).startedServers
-            .firstOrNull { it.serverDefinition.id == SERVER_ID && it.serverStatus == ServerStatus.started }
-            ?.currentProcessId?.let { ProcessHandle.of(it).orElse(null) }?.takeIf { it.isAlive }
         // the OS reports the resolved executable, so compare canonical paths
         fun runs(p: ProcessHandle?, path: String) = p != null &&
             p.info().command().map { File(it).canonicalPath }.orElse("") == File(path).canonicalPath &&
             p.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp"))
+        // The live server process: a child running `<binary> --lsp`, found by command line. Not
+        // LSP4IJ's currentProcessId: when two starts overlap (LSP4IJ's own for the open file and
+        // the plugin's restart), the attempt that loses writes its pid last and then ends its
+        // process, so that pid can name a dead process while the server runs (LSP4IJ 0.30.1,
+        // LanguageServerWrapper.start). Only while LSP4IJ reports the server started.
+        fun server(path: String): ProcessHandle? =
+            if (LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID) != ServerStatus.started) null
+            else ProcessHandle.current().descendants().filter { it.isAlive && runs(it, path) }.findFirst().orElse(null)
         GroovyfmtSettings.get().path = a
         open()
         val service = fixture.project.service<GroovyfmtService>()
@@ -321,8 +323,8 @@ class IntegrationTest : UsefulTestCase() {
                 "--lsp processes=${ProcessHandle.current().descendants().filter { it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }.map { "${it.pid()}:${it.info().command().orElse("?")}" }.toList()}"
         }
         waitFor("the server to run A", 60_000, state) {
-            serverA = server()
-            runs(serverA, a)
+            serverA = server(a)
+            serverA != null
         }
         GroovyfmtSettings.get().path = b.path
         val first = service.restart()
@@ -330,7 +332,7 @@ class IntegrationTest : UsefulTestCase() {
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
         waitFor("the server to run B in place of A", 60_000, state) {
-            runs(server(), b.path) && !serverA!!.isAlive
+            server(b.path) != null && !serverA!!.isAlive
         }
     }
 
