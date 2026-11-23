@@ -2,6 +2,10 @@
 
 The plugin's version follows groovyfmt's: version X.Y.Z downloads groovyfmt X.Y.Z when it finds no groovyfmt installed. The groovyfmt changes are in its [changelog](https://github.com/costajohnt/groovyfmt/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+- Built and tested against LSP4IJ 0.30.1, which no longer leaves a `groovyfmt --lsp` process running after a settings change during server startup. Update LSP4IJ to get the fix.
+
 ## 0.19.0 (2026-11-15)
 
 - New icon.
