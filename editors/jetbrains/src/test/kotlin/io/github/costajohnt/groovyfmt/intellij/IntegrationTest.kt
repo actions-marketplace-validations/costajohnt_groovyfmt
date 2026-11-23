@@ -311,7 +311,16 @@ class IntegrationTest : UsefulTestCase() {
         val service = fixture.project.service<GroovyfmtService>()
         service.restart().get(30, TimeUnit.SECONDS)
         var serverA: ProcessHandle? = null
-        waitFor("the server to run A", 60_000) {
+        val state = {
+            val w = LanguageServiceAccessor.getInstance(fixture.project).startedServers.firstOrNull { it.serverDefinition.id == SERVER_ID }
+            val pid = w?.currentProcessId
+            "status=${LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID)} " +
+                "wrapperStatus=${w?.serverStatus} pid=$pid pidAlive=${pid?.let { ProcessHandle.of(it).map { h -> h.isAlive }.orElse(false) }} " +
+                "pidCommand=${pid?.let { ProcessHandle.of(it).flatMap { h -> h.info().command() }.orElse("?") }} " +
+                "A alive=${serverA?.isAlive} binary=${service.binary?.path} launched=${service.launched?.path} stoppedInLsp4ij=${service.stoppedInLsp4ij} " +
+                "--lsp processes=${ProcessHandle.current().descendants().filter { it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }.map { "${it.pid()}:${it.info().command().orElse("?")}" }.toList()}"
+        }
+        waitFor("the server to run A", 60_000, state) {
             serverA = server()
             runs(serverA, a)
         }
@@ -320,13 +329,6 @@ class IntegrationTest : UsefulTestCase() {
         val second = service.restart()
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
-        val state = {
-            val p = server()
-            "status=${LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID)} " +
-                "server=${p?.info()?.command()?.orElse("?")} A alive=${serverA!!.isAlive} " +
-                "binary=${service.binary?.path} launched=${service.launched?.path} stoppedInLsp4ij=${service.stoppedInLsp4ij} " +
-                "--lsp processes=${ProcessHandle.current().descendants().filter { it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }.map { it.info().command().orElse("?") }.toList()}"
-        }
         waitFor("the server to run B in place of A", 60_000, state) {
             runs(server(), b.path) && !serverA!!.isAlive
         }
