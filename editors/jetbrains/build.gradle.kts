@@ -21,7 +21,7 @@ repositories {
 
 // The oldest IDE the plugin runs in: LSP4IJ's own minimum, IntelliJ Platform 2024.2.
 val minBuild = "242"
-val lsp4ij = "com.redhat.devtools.lsp4ij:0.21.0"
+val lsp4ij = "com.redhat.devtools.lsp4ij:0.30.1"
 
 dependencies {
     intellijPlatform {

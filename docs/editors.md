@@ -73,7 +73,7 @@ With LSP4IJ installed, groovyfmt also runs as an LSP4IJ user-defined language se
 - **Mappings** tab, **File name patterns**: the patterns `*.groovy;*.gvy;*.gy;*.gsh;*.gradle;*.jenkinsfile;*.jenkins;Jenkinsfile;Jenkinsfile.*;Jenkinsfile_*;Jenkinsfile-*;*-Jenkinsfile;*_Jenkinsfile` with the **Language ID** `groovy`.
 - **Configuration** tab, **Client**: `{"format": {"existingFormatterOverrideable": true}}` if Reformat Code should run groovyfmt in place of the IDE's Groovy formatter. Without it, Reformat Code runs groovyfmt only in files the IDE has no formatter for.
 
-Diagnostics, quick fixes and Reformat Code then come from groovyfmt. The plugin's integration tests run this setup, as LSP4IJ 0.21.0 creates it, in IntelliJ IDEA Community 2024.2. It runs whatever binary the command names, in every project, trusted or not, and nothing downloads groovyfmt for you.
+Diagnostics, quick fixes and Reformat Code then come from groovyfmt. The plugin's integration tests run this setup, as LSP4IJ 0.30.1 creates it, in IntelliJ IDEA Community 2024.2. It runs whatever binary the command names, in every project, trusted or not, and nothing downloads groovyfmt for you.
 
 #### Without a language server
 

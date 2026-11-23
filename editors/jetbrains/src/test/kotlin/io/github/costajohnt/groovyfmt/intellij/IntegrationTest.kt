@@ -103,10 +103,10 @@ class IntegrationTest : UsefulTestCase() {
     }
 
     /** Runs the IDE's event queue until `done` or the timeout. */
-    private fun waitFor(what: String, timeoutMs: Long, done: () -> Boolean) {
+    private fun waitFor(what: String, timeoutMs: Long, state: () -> String = { "" }, done: () -> Boolean) {
         val end = System.currentTimeMillis() + timeoutMs
         while (!done()) {
-            if (System.currentTimeMillis() > end) fail("timed out after $timeoutMs ms waiting for $what")
+            if (System.currentTimeMillis() > end) fail("timed out after $timeoutMs ms waiting for $what${state().let { if (it.isEmpty()) "" else "; $it" }}")
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
             Thread.sleep(100)
         }
@@ -296,32 +296,43 @@ class IntegrationTest : UsefulTestCase() {
         Files.copy(File(a).toPath(), b.toPath())
         b.setExecutable(true)
         expectServerThreads(b.path)
-        // The process LSP4IJ runs the server in. Not any process running the binary: LSP4IJ can
-        // lose a process it launches while it stops the server, and one of those, left running,
-        // is not the server.
-        fun server(): ProcessHandle? = LanguageServiceAccessor.getInstance(fixture.project).startedServers
-            .firstOrNull { it.serverDefinition.id == SERVER_ID && it.serverStatus == ServerStatus.started }
-            ?.currentProcessId?.let { ProcessHandle.of(it).orElse(null) }?.takeIf { it.isAlive }
         // the OS reports the resolved executable, so compare canonical paths
         fun runs(p: ProcessHandle?, path: String) = p != null &&
             p.info().command().map { File(it).canonicalPath }.orElse("") == File(path).canonicalPath &&
             p.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp"))
+        // The live server process: a child running `<binary> --lsp`, found by command line. Not
+        // LSP4IJ's currentProcessId: when two starts overlap (LSP4IJ's own for the open file and
+        // the plugin's restart), the attempt that loses writes its pid last and then ends its
+        // process, so that pid can name a dead process while the server runs (LSP4IJ 0.30.1,
+        // LanguageServerWrapper.start). Only while LSP4IJ reports the server started.
+        fun server(path: String): ProcessHandle? =
+            if (LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID) != ServerStatus.started) null
+            else ProcessHandle.current().descendants().filter { it.isAlive && runs(it, path) }.findFirst().orElse(null)
         GroovyfmtSettings.get().path = a
         open()
         val service = fixture.project.service<GroovyfmtService>()
         service.restart().get(30, TimeUnit.SECONDS)
         var serverA: ProcessHandle? = null
-        waitFor("the server to run A", 60_000) {
-            serverA = server()
-            runs(serverA, a)
+        val state = {
+            val w = LanguageServiceAccessor.getInstance(fixture.project).startedServers.firstOrNull { it.serverDefinition.id == SERVER_ID }
+            val pid = w?.currentProcessId
+            "status=${LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID)} " +
+                "wrapperStatus=${w?.serverStatus} pid=$pid pidAlive=${pid?.let { ProcessHandle.of(it).map { h -> h.isAlive }.orElse(false) }} " +
+                "pidCommand=${pid?.let { ProcessHandle.of(it).flatMap { h -> h.info().command() }.orElse("?") }} " +
+                "A alive=${serverA?.isAlive} binary=${service.binary?.path} launched=${service.launched?.path} stoppedInLsp4ij=${service.stoppedInLsp4ij} " +
+                "--lsp processes=${ProcessHandle.current().descendants().filter { it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }.map { "${it.pid()}:${it.info().command().orElse("?")}" }.toList()}"
+        }
+        waitFor("the server to run A", 60_000, state) {
+            serverA = server(a)
+            serverA != null
         }
         GroovyfmtSettings.get().path = b.path
         val first = service.restart()
         val second = service.restart()
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
-        waitFor("the server to run B in place of A", 60_000) {
-            runs(server(), b.path) && !serverA!!.isAlive
+        waitFor("the server to run B in place of A", 60_000, state) {
+            server(b.path) != null && !serverA!!.isAlive
         }
     }
 

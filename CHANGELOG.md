@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- JetBrains plugin: built and tested against LSP4IJ 0.30.1. LSP4IJ 0.30.1 and later no longer leave a `groovyfmt --lsp` process running when a settings change restarts the server during startup; update LSP4IJ in the IDE to get the fix. ([#97](https://github.com/costajohnt/groovyfmt/issues/97))
+
 ## 0.32.0 (2026-11-20)
 
 ### Added
