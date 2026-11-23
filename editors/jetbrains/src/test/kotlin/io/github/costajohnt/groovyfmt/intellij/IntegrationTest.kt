@@ -103,10 +103,10 @@ class IntegrationTest : UsefulTestCase() {
     }
 
     /** Runs the IDE's event queue until `done` or the timeout. */
-    private fun waitFor(what: String, timeoutMs: Long, done: () -> Boolean) {
+    private fun waitFor(what: String, timeoutMs: Long, state: () -> String = { "" }, done: () -> Boolean) {
         val end = System.currentTimeMillis() + timeoutMs
         while (!done()) {
-            if (System.currentTimeMillis() > end) fail("timed out after $timeoutMs ms waiting for $what")
+            if (System.currentTimeMillis() > end) fail("timed out after $timeoutMs ms waiting for $what${state().let { if (it.isEmpty()) "" else "; $it" }}")
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
             Thread.sleep(100)
         }
@@ -320,7 +320,14 @@ class IntegrationTest : UsefulTestCase() {
         val second = service.restart()
         first.get(30, TimeUnit.SECONDS)
         second.get(30, TimeUnit.SECONDS)
-        waitFor("the server to run B in place of A", 60_000) {
+        val state = {
+            val p = server()
+            "status=${LanguageServerManager.getInstance(fixture.project).getServerStatus(SERVER_ID)} " +
+                "server=${p?.info()?.command()?.orElse("?")} A alive=${serverA!!.isAlive} " +
+                "binary=${service.binary?.path} launched=${service.launched?.path} stoppedInLsp4ij=${service.stoppedInLsp4ij} " +
+                "--lsp processes=${ProcessHandle.current().descendants().filter { it.info().arguments().orElse(arrayOf()).contentEquals(arrayOf("--lsp")) }.map { it.info().command().orElse("?") }.toList()}"
+        }
+        waitFor("the server to run B in place of A", 60_000, state) {
             runs(server(), b.path) && !serverA!!.isAlive
         }
     }
